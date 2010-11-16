@@ -6,12 +6,10 @@ import org.jboss.netty.buffer._
 import org.jboss.netty.channel._
 import org.jboss.netty.handler.codec.http._
 
-import com.twitter.ostrich
+import com.twitter.finagle.builder._
+import com.twitter.ostrich.{ServiceTracker, Service, Config, RuntimeEnvironment}
 
-import com.twitter.finagle.server._
-import net.lag.configgy.{Configgy, RuntimeEnvironment}
-
-object ServerTest extends ostrich.Service {
+object ServerTest extends Service {
   class Handler extends SimpleChannelUpstreamHandler {
     override def messageReceived(ctx: ChannelHandlerContext, e: MessageEvent) {
       val response = new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK)
@@ -22,12 +20,15 @@ object ServerTest extends ostrich.Service {
   }
 
   def main(args: Array[String]) {
-    val runtime = new RuntimeEnvironment(getClass)
-    runtime.load(args)
-    val config = Configgy.config
+    val config = new Config {
+      def telnetPort = 0
+      def httpBacklog = 0
+      def httpPort = 8889
+      def jmxPackage = None
+    }
 
-    ostrich.ServiceTracker.register(this)
-    ostrich.ServiceTracker.startAdmin(config, runtime)
+    ServiceTracker.register(this)
+    ServiceTracker.startAdmin(config, new RuntimeEnvironment(getClass))
 
     val pf = new ChannelPipelineFactory {
       def getPipeline = {
@@ -36,12 +37,12 @@ object ServerTest extends ostrich.Service {
         pipeline
       }
     }
-
     val bs =
-      Builder().codec(Http)
-               .pipelineFactory(pf)
-               .reportTo(Ostrich())
-               .build
+      ServerBuilder()
+       .codec(Http)
+       .reportTo(Ostrich())
+       .pipelineFactory(pf)
+       .build
 
     val addr = new InetSocketAddress(8888)
     println("HTTP demo running on %s".format(addr))

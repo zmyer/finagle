@@ -3,7 +3,7 @@ import sbt._
 import com.twitter.sbt._
 
 class Project(info: ProjectInfo) extends StandardProject(info) {
-  // override def compileOrder = CompileOrder.JavaThenScala
+  override def compileOrder = CompileOrder.ScalaThenJava
   override def managedStyle = ManagedStyle.Maven
   override def disableCrossPaths = true
 
