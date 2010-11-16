@@ -1,16 +1,16 @@
 package com.twitter.finagle.builder
- 
+
 import scala.collection.JavaConversions._
 
 import java.net.InetSocketAddress
 import java.util.concurrent.{TimeUnit, Executors}
- 
+
 import org.jboss.netty.bootstrap.ServerBootstrap
 import org.jboss.netty.buffer._
 import org.jboss.netty.channel._
 import org.jboss.netty.handler.codec.http._
 import org.jboss.netty.channel.socket.nio._
- 
+
 import com.twitter.ostrich
 import com.twitter.util.TimeConversions._
 import com.twitter.util.{Duration, Time}
@@ -19,17 +19,17 @@ import com.twitter.finagle._
 import com.twitter.finagle.util._
 import com.twitter.finagle.thrift._
 import com.twitter.finagle.stub.{Stub, StubPipelineFactory}
- 
+
 object ServerBuilder {
   def apply() = new ServerBuilder()
   def get() = apply()
- 
+
   val channelFactory =
     new NioServerSocketChannelFactory(
       Executors.newCachedThreadPool(),
       Executors.newCachedThreadPool())
 }
- 
+
 class SampleHandler(samples: SampleRepository[AddableSample[_]])
   extends SimpleChannelHandler{
   val dispatchSample: AddableSample[_] = samples("dispatch")
@@ -46,7 +46,7 @@ class SampleHandler(samples: SampleRepository[AddableSample[_]])
     }
     super.exceptionCaught(ctx, e)
   }
- 
+
   override def handleUpstream(ctx: ChannelHandlerContext, c: ChannelEvent) {
     if (c.isInstanceOf[MessageEvent]) {
       dispatchSample.incr()
@@ -55,7 +55,7 @@ class SampleHandler(samples: SampleRepository[AddableSample[_]])
 
     super.handleUpstream(ctx, c)
   }
- 
+
   override def handleDownstream(ctx: ChannelHandlerContext, c: ChannelEvent) {
     if (c.isInstanceOf[MessageEvent]) {
       ctx.getAttachment match {
@@ -68,7 +68,7 @@ class SampleHandler(samples: SampleRepository[AddableSample[_]])
     super.handleDownstream(ctx, c)
   }
 }
- 
+
 case class ServerBuilder(
   _codec: Option[Codec],
   _connectionTimeout: Timeout,
@@ -97,33 +97,33 @@ case class ServerBuilder(
     None,                                           // pipelineFactory
     None                                            // bindTo
   )
- 
+
   def codec(codec: Codec) =
     copy(_codec = Some(codec))
- 
+
   def connectionTimeout(value: Long, unit: TimeUnit) =
     copy(_connectionTimeout = Timeout(value, unit))
- 
+
   def requestTimeout(value: Long, unit: TimeUnit) =
     copy(_requestTimeout = Timeout(value, unit))
- 
+
   def reportTo(receiver: StatsReceiver) =
     copy(_statsReceiver = Some(receiver))
- 
+
   def sampleWindow(value: Long, unit: TimeUnit) =
     copy(_sampleWindow = Timeout(value, unit))
- 
+
   def sampleGranularity(value: Long, unit: TimeUnit) =
     copy(_sampleGranularity = Timeout(value, unit))
- 
+
   def name(value: String) = copy(_name = Some(value))
- 
+
   def sendBufferSize(value: Int) = copy(_sendBufferSize = Some(value))
   def recvBufferSize(value: Int) = copy(_recvBufferSize = Some(value))
- 
+
   def pipelineFactory(value: ChannelPipelineFactory) =
     copy(_pipelineFactory = Some(value))
- 
+
   def stub[Req <: AnyRef, Rep <: AnyRef](stub: Stub[Req, Rep]) =
     copy(_pipelineFactory = Some(StubPipelineFactory(stub)))
 
@@ -143,7 +143,7 @@ case class ServerBuilder(
       throw new IncompleteSpecification(
         "window smaller than granularity!")
     }
- 
+
     val prefix = name map ("%s_".format(_)) getOrElse ""
     val sampleRepository =
       new ObservableSampleRepository[TimeWindowedSample[ScalarSample]] {
@@ -152,10 +152,10 @@ case class ServerBuilder(
 
     for (receiver <- receiver)
       sampleRepository observeTailsWith receiver.observer(prefix, host)
- 
+
     sampleRepository
   }
- 
+
   def build: ServerBootstrap = {
     val (codec, pipelineFactory) = (_codec, _pipelineFactory) match {
       case (None, _) =>
@@ -165,23 +165,23 @@ case class ServerBuilder(
       case (Some(codec), Some(pipeline)) =>
         (codec, pipeline)
     }
- 
+
    if (_bindTo.isEmpty)
      throw new IncompleteSpecification("No binding address was given")
 
    val bs = new ServerBootstrap(channelFactory)
- 
+
     bs.setOption("tcpNoDelay", true)
     // bs.setOption("soLinger", 0) // XXX: (TODO)
     bs.setOption("reuseAddress", true)
     _sendBufferSize foreach { s => bs.setOption("sendBufferSize", s) }
     _recvBufferSize foreach { s => bs.setOption("receiveBufferSize", s) }
- 
+
     val statsRepo = statsRepository(
       _name, _statsReceiver,
       _sampleWindow, _sampleGranularity,
       _bindTo.get)
- 
+
     bs.setPipelineFactory(new ChannelPipelineFactory {
       def getPipeline = {
         val pipeline = codec.serverPipelineFactory.getPipeline
@@ -190,11 +190,11 @@ case class ServerBuilder(
 
         for ((name, handler) <- pipelineFactory.getPipeline.toMap)
           pipeline.addLast(name, handler)
-        
+
         pipeline
       }
     })
- 
+
     bs.bind(_bindTo.get)
     bs
   }

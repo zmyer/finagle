@@ -6,7 +6,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.Queue
 import scala._
 
-private case class Job(ctx: ChannelHandlerContext, e: MessageEvent) extends Serialized {
+case class Job(ctx: ChannelHandlerContext, e: MessageEvent) extends Serialized {
   @volatile private var _isAlive = true
   @volatile private var _isStarted = false
 
