@@ -6,12 +6,10 @@ import org.jboss.netty.buffer._
 import org.jboss.netty.channel._
 import org.jboss.netty.handler.codec.http._
 
-import net.lag.configgy.{Configgy, RuntimeEnvironment}
-
 import com.twitter.ostrich
 
 import com.twitter.finagle.server._
-
+import net.lag.configgy.{Configgy, RuntimeEnvironment}
 
 object ServerTest extends ostrich.Service {
   class Handler extends SimpleChannelUpstreamHandler {
