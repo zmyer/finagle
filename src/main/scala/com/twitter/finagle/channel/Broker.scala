@@ -4,11 +4,9 @@ import java.util.concurrent.TimeUnit
 import java.net.SocketAddress
 
 import org.jboss.netty.channel.{
-  Channel, ChannelFuture, MessageEvent,
-  ChannelLocal, DefaultChannelFuture}
+  MessageEvent, DefaultChannelFuture}
 import org.jboss.netty.util.HashedWheelTimer
 
-import com.twitter.finagle.util.{Ok, Error, Cancelled}
 import com.twitter.finagle.util.Conversions._
 
 sealed abstract class Reply

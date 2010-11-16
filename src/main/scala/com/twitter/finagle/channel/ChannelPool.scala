@@ -1,12 +1,10 @@
 package com.twitter.finagle.channel
 
 import collection.mutable.Queue
-
-import org.jboss.netty.bootstrap.ClientBootstrap
+import com.twitter.finagle.util.Conversions._
 import org.jboss.netty.channel.{Channels, Channel}
 import java.util.concurrent.ConcurrentLinkedQueue
 
-import com.twitter.finagle.util.Conversions._
 import com.twitter.finagle.util._
 
 class ChannelPool(clientBootstrap: BrokerClientBootstrap) extends Serialized

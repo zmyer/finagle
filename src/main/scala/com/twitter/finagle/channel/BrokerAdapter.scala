@@ -1,10 +1,8 @@
 package com.twitter.finagle.channel
 
 import java.util.concurrent.atomic.AtomicReference
-
-import org.jboss.netty.channel._
-
 import com.twitter.finagle.util.Conversions._
+import org.jboss.netty.channel._
 
 class BrokerAdapter extends SimpleChannelUpstreamHandler {
   val currentReplyFuture = new AtomicReference[ReplyFuture](null)

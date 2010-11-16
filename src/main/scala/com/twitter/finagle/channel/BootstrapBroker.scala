@@ -1,10 +1,6 @@
 package com.twitter.finagle.channel
 
-import org.jboss.netty.bootstrap.ClientBootstrap
-import org.jboss.netty.channel.{Channels, Channel, MessageEvent}
-
-import com.twitter.finagle.util.{Ok, Error}
-import com.twitter.finagle.util.Conversions._
+import org.jboss.netty.channel.{Channels, Channel}
 
 class BootstrapBroker(bootstrap: BrokerClientBootstrap) extends ConnectingChannelBroker {
   if (bootstrap.getOption("remoteAddress") eq null)

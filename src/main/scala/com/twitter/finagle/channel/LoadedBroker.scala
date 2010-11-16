@@ -1,18 +1,10 @@
 package com.twitter.finagle.channel
 
 import scala.util.Random
-import scala.collection.mutable.HashMap
-import scala.collection.JavaConversions._
-
-import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.ConcurrentHashMap
-
 import org.jboss.netty.channel.MessageEvent
-
-import com.twitter.util.{Time, Duration}
-import com.twitter.util.TimeConversions._
-import com.twitter.finagle.util._
 import com.twitter.finagle.util.Conversions._
+import com.twitter.util.Time
+import com.twitter.finagle.util._
 
 /**
  * This is F-bounded to ensure that we have a homogenous set of
@@ -91,7 +83,7 @@ class FailureAccruingLoadedBroker(
       }
     }
   }
- 
+
 }
 
 class LeastLoadedBroker[A <: LoadedBroker[A]](endpoints: Seq[A]) extends Broker {

@@ -1,15 +1,11 @@
 package com.twitter.finagle.channel
 
-import java.util.concurrent.LinkedBlockingQueue
-import java.util.concurrent.atomic.AtomicInteger
 import java.nio.channels.NotYetConnectedException
-
+import com.twitter.finagle.util.Conversions._
 import org.jboss.netty.channel._
 import org.jboss.netty.channel.local.LocalAddress
 
 import com.twitter.finagle.util.{Ok, Error, Cancelled, Serialized}
-import com.twitter.finagle.util.Conversions._
-
 class BrokeredChannel(
   factory: BrokeredChannelFactory,
   pipeline: ChannelPipeline,
@@ -84,11 +80,11 @@ class BrokeredChannel(
                 waitingForReply = Some(next)
                 proxyMessages(next)
             }
-         
+
           case Error(cause) =>
             Channels.fireExceptionCaught(this, cause)
             waitingForReply = None
-         
+
           case Cancelled =>
             // XXXTODO
         }

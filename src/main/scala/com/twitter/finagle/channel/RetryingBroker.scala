@@ -6,11 +6,8 @@ import org.jboss.netty.channel.{
   Channels, Channel, DownstreamMessageEvent,
   MessageEvent, ChannelFuture}
 import org.jboss.netty.util.{HashedWheelTimer, TimerTask, Timeout}
-
-import com.twitter.finagle.util.{Cancelled, Error, Ok}
 import com.twitter.finagle.util.Conversions._
-
-import com.twitter.util.TimeConversions._
+import com.twitter.finagle.util.{Cancelled, Error, Ok}
 import com.twitter.util.Duration
 
 trait RetryingBrokerBase extends Broker {
@@ -74,7 +71,7 @@ class ExponentialBackoffRetryingBroker(val underlying: Broker, initial: Duration
 
   def retryFuture(channel: Channel) = {
     val future = Channels.future(channel)
-    
+
     timer.newTimeout(new TimerTask {
       def run(to: Timeout) {
         ExponentialBackoffRetryingBroker.this.delay *= multiplier
