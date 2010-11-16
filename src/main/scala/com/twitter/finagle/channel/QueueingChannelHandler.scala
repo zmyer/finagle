@@ -12,7 +12,7 @@ case class Job(ctx: ChannelHandlerContext, e: MessageEvent) extends Serialized {
 
   def apply() {
     _isStarted = true
-    Channels.fireMessageReceived(ctx, e, e.getRemoteAddress)
+    Channels.fireMessageReceived(ctx, e.getMessage, e.getRemoteAddress)
   }
 
   def isAlive = _isAlive
