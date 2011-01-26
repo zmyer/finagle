@@ -145,8 +145,8 @@ case class ServerBuilder(
 
   def logger(logger: Logger): ServerBuilder = copy(_logger = Some(logger))
 
-  def tls(path: String, password: String): ServerBuilder =
-    copy(_tls = Some(Ssl(path, password)))
+  def tls(path: String, password: String) =
+    copy(_tls = Some(Ssl.server(path, password)))
 
   def startTls(value: Boolean): ServerBuilder =
     copy(_startTls = true)
