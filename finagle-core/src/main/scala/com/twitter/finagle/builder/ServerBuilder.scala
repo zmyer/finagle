@@ -41,12 +41,12 @@ object ServerBuilder {
   def apply() = new ServerBuilder[Any, Any]()
   def get() = apply()
 
-  val defaultChannelFactory =
+  val defaultChannelFactory = {
+    val threadPool = Executors.newCachedThreadPool()
     new ReferenceCountedChannelFactory(
       new LazyRevivableChannelFactory(() =>
-        new NioServerSocketChannelFactory(
-          Executors.newCachedThreadPool(),
-          Executors.newCachedThreadPool())))
+        new NioServerSocketChannelFactory(threadPool, threadPool)))
+  }
 }
 
 // TODO: common superclass between client & server builders for common
@@ -58,6 +58,9 @@ case class ServerBuilder[Req, Rep](
   _name: Option[String],
   _sendBufferSize: Option[Int],
   _recvBufferSize: Option[Int],
+  _keepAlive: Option[Boolean],
+  _backlog: Option[Int],
+  _service: Option[Service[Req, Rep]],
   _bindTo: Option[SocketAddress],
   _logger: Option[Logger],
   _tls: Option[(String, String)],
@@ -76,6 +79,9 @@ case class ServerBuilder[Req, Rep](
     None,                  // name
     None,                  // sendBufferSize
     None,                  // recvBufferSize
+    None,                  // keepAlive
+    None,                  // backlog
+    None,                  // service
     None,                  // bindTo
     None,                  // logger
     None,                  // tls
@@ -93,6 +99,8 @@ case class ServerBuilder[Req, Rep](
     "name"                      -> _name,
     "sendBufferSize"            -> _sendBufferSize,
     "recvBufferSize"            -> _recvBufferSize,
+    "keepAlive"                 -> _keepAlive,
+    "backlog"                   -> _backlog,
     "bindTo"                    -> _bindTo,
     "logger"                    -> _logger,
     "tls"                       -> _tls,
@@ -122,6 +130,9 @@ case class ServerBuilder[Req, Rep](
 
   def sendBufferSize(value: Int) = copy(_sendBufferSize = Some(value))
   def recvBufferSize(value: Int) = copy(_recvBufferSize = Some(value))
+  def keepAlive(value: Boolean) = copy(_keepAlive = Some(value))
+
+  def backlog(value: Int) = copy(_backlog = Some(value))
 
   def bindTo(address: SocketAddress) =
     copy(_bindTo = Some(address))
@@ -164,10 +175,22 @@ case class ServerBuilder[Req, Rep](
     val bs = new ServerBootstrap(new ChannelFactoryToServerChannelFactory(cf))
 
     bs.setOption("tcpNoDelay", true)
+    bs.setOption("child.tcpNoDelay", true)
     // bs.setOption("soLinger", 0) // XXX: (TODO)
     bs.setOption("reuseAddress", true)
-    _sendBufferSize foreach { s => bs.setOption("sendBufferSize", s) }
-    _recvBufferSize foreach { s => bs.setOption("receiveBufferSize", s) }
+    _backlog.foreach { s => bs.setOption("backlog", s) }
+    _sendBufferSize.foreach { s =>
+      bs.setOption("sendBufferSize", s)
+      bs.setOption("child.sendBufferSize", s)
+    }
+    _recvBufferSize.foreach { s =>
+      bs.setOption("receiveBufferSize", s)
+      bs.setOption("child.receiveBufferSize", s)
+    }
+    _keepAlive.foreach { s =>
+      bs.setOption("keepAlive", s)
+      bs.setOption("child.keepAlive", s)
+    }
 
     // TODO: we need something akin to a max queue depth.
     val queueingChannelHandler = _maxConcurrentRequests map { maxConcurrentRequests =>

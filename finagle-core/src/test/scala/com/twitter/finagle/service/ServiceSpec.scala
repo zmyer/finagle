@@ -14,7 +14,7 @@ object ServiceSpec extends Specification {
           service(request.toString) map (_.toInt)
       }
 
-    val stringToInt = 
+    val stringToInt =
       new Filter[String, String, java.lang.Integer, java.lang.Integer] {
         def apply(request: String, service: Service[java.lang.Integer, java.lang.Integer]) =
           service(request.toInt) map (_.toString)
