@@ -13,23 +13,21 @@ object Timer {
       new Timer(new HashedWheelTimer(10, TimeUnit.MILLISECONDS)))
 }
 
-class Timer(underlying: org.jboss.netty.util.Timer) extends com.twitter.util.Timer 
-{
+class Timer(underlying: org.jboss.netty.util.Timer) extends com.twitter.util.Timer {
   def schedule(when: Time)(f: => Unit): TimerTask = {
     val timeout = underlying.newTimeout(new org.jboss.netty.util.TimerTask {
       def run(to: Timeout) {
         if (!to.isCancelled) f
       }
-    }, (when - Time.now).inMilliseconds, TimeUnit.MILLISECONDS)
+    }, (when - Time.now).inMilliseconds max 0, TimeUnit.MILLISECONDS)
     toTimerTask(timeout)
   }
 
   def schedule(when: Time, period: Duration)(f: => Unit): TimerTask = {
-    val task = schedule(when) {
+    schedule(when) {
       f
-      schedule(period)(f)
+      schedule(when + period, period)(f)
     }
-    task
   }
 
   def stop() { underlying.stop() }
