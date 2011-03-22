@@ -21,6 +21,8 @@ import com.twitter.finagle.service._
 import com.twitter.finagle.stats.{StatsReceiver, RollupStatsReceiver, NullStatsReceiver}
 import com.twitter.finagle.loadbalancer.{LoadBalancedFactory, LeastQueuedStrategy}
 
+trait RetryStrategy
+
 object ClientBuilder {
   def apply() = new ClientBuilder[Any, Any]
   def get() = apply()
@@ -57,7 +59,8 @@ case class ClientBuilder[Req, Rep](
   _logger: Option[Logger],
   _channelFactory: Option[ReferenceCountedChannelFactory],
   _tls: Option[SSLContext],
-  _startTls: Boolean)
+  _startTls: Boolean,
+  _retryStrategy: Option[RetryStrategy])
 {
   def this() = this(
     None,               // cluster
@@ -77,7 +80,8 @@ case class ClientBuilder[Req, Rep](
     None,               // logger
     None,               // channelFactory
     None,               // tls
-    false               // startTls
+    false,              // startTls
+    None                // retryStrategy
   )
 
   private[this] def options = Seq(
@@ -98,7 +102,8 @@ case class ClientBuilder[Req, Rep](
     "logger"                    -> _logger,
     "channelFactory"            -> _channelFactory,
     "tls"                       -> _tls,
-    "startTls"                  -> _startTls
+    "startTls"                  -> _startTls,
+    "retryStrategy"             -> _retryStrategy
   )
 
   override def toString() = {
@@ -168,6 +173,9 @@ case class ClientBuilder[Req, Rep](
 
   def retries(value: Int) =
     copy(_retries = Some(value))
+
+  def retryStrategy(strategy: RetryStrategy) =
+    copy(_retryStrategy = Some(strategy))
 
   def sendBufferSize(value: Int) = copy(_sendBufferSize = Some(value))
   def recvBufferSize(value: Int) = copy(_recvBufferSize = Some(value))
