@@ -76,6 +76,8 @@ final case class ServerConfig[Req, Rep](
   private val _name:                      Option[String]                   = None,
   private val _sendBufferSize:            Option[Int]                      = None,
   private val _recvBufferSize:            Option[Int]                      = None,
+  private val _keepAlive:                 Option[Boolean]                  = None,
+  private val _backlog:                   Option[Int]                      = None,
   private val _bindTo:                    Option[SocketAddress]            = None,
   private val _logger:                    Option[Logger]                   = None,
   private val _tls:                       Option[(String, String)]         = None,
@@ -87,8 +89,8 @@ final case class ServerConfig[Req, Rep](
   private val _requestTimeout:            Option[Duration]                 = None,
   private val _readTimeout:               Option[Duration]                 = None,
   private val _writeCompletionTimeout:    Option[Duration]                 = None,
-  private val _traceReceiver:             TraceReceiver                    = new NullTraceReceiver)
-{
+  private val _traceReceiver:             TraceReceiver                    = new NullTraceReceiver
+) {
   /**
    * The Scala compiler errors if the case class members don't have underscores.
    * Nevertheless, we want a friendly public API so we create delegators without
@@ -99,6 +101,8 @@ final case class ServerConfig[Req, Rep](
   val name                      = _name
   val sendBufferSize            = _sendBufferSize
   val recvBufferSize            = _recvBufferSize
+  val keepAlive                 = _keepAlive
+  val backlog                   = _backlog
   val bindTo                    = _bindTo
   val logger                    = _logger
   val tls                       = _tls
@@ -118,6 +122,8 @@ final case class ServerConfig[Req, Rep](
     "name"                      -> _name,
     "sendBufferSize"            -> _sendBufferSize,
     "recvBufferSize"            -> _recvBufferSize,
+    "keepAlive"                 -> _keepAlive,
+    "backlog"                   -> _backlog,
     "bindTo"                    -> _bindTo,
     "logger"                    -> _logger,
     "tls"                       -> _tls,
@@ -188,6 +194,12 @@ class ServerBuilder[Req, Rep](val config: ServerConfig[Req, Rep]) {
   def recvBufferSize(value: Int) =
     withConfig(_.copy(_recvBufferSize = Some(value)))
 
+  def keepAlive(value: Boolean) =
+    withConfig(_.copy(_keepAlive = Some(value)))
+
+  def backlog(value: Int) =
+    withConfig(_.copy(_backlog = Some(value)))
+
   def bindTo(address: SocketAddress) =
     withConfig(_.copy(_bindTo = Some(address)))
 
@@ -247,10 +259,22 @@ class ServerBuilder[Req, Rep](val config: ServerConfig[Req, Rep]) {
     val bs = new ServerBootstrap(new ChannelFactoryToServerChannelFactory(cf))
 
     bs.setOption("tcpNoDelay", true)
+    bs.setOption("child.tcpNoDelay", true)
     // bs.setOption("soLinger", 0) // XXX: (TODO)
     bs.setOption("reuseAddress", true)
-    config.sendBufferSize foreach { s => bs.setOption("sendBufferSize", s) }
-    config.recvBufferSize foreach { s => bs.setOption("receiveBufferSize", s) }
+    config.backlog.foreach { s => bs.setOption("backlog", s) }
+    config.sendBufferSize.foreach { s =>
+      bs.setOption("sendBufferSize", s)
+      bs.setOption("child.sendBufferSize", s)
+    }
+    config.recvBufferSize.foreach { s =>
+      bs.setOption("receiveBufferSize", s)
+      bs.setOption("child.receiveBufferSize", s)
+    }
+    config.keepAlive.foreach { s =>
+      bs.setOption("keepAlive", s)
+      bs.setOption("child.keepAlive", s)
+    }
 
     // TODO: we need something akin to a max queue depth.
     val queueingChannelHandlerAndGauges =
