@@ -15,6 +15,7 @@ private[finagle] class RefcountedService[Req, Rep](underlying: Service[Req, Rep]
 
   override def isAvailable = underlying.isAvailable
   override final def release() = replyLatch.await { doRelease() }
+  override def connected() = underlying.connected()
 
   protected def doRelease() = underlying.release()
 }

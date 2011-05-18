@@ -11,7 +11,7 @@ import com.twitter.util.{Future, Promise, Return, Throw}
 
 import com.twitter.finagle.util.Conversions._
 import com.twitter.finagle.stats.{StatsReceiver, NullStatsReceiver}
-import com.twitter.finagle.{CodecException, Service, WriteTimedOutException}
+import com.twitter.finagle.{ClientConnection, CodecException, Service, WriteTimedOutException}
 
 private[finagle] object ServiceToChannelHandler {
   // valid transitions are:
@@ -27,16 +27,19 @@ private[finagle] object ServiceToChannelHandler {
 private[finagle] class ServiceToChannelHandler[Req, Rep](
     service: Service[Req, Rep],
     statsReceiver: StatsReceiver,
-    log: Logger)
+    log: Logger,
+    clientConnection: Option[ClientConnection])
   extends ChannelClosingHandler
 {
   import ServiceToChannelHandler._
   import State._
 
+  def this(service: Service[Req, Rep], statsReceiver: StatsReceiver, clientConnection: Option[ClientConnection]) =
+    this(service, statsReceiver, Logger.getLogger(getClass.getName), clientConnection)
   def this(service: Service[Req, Rep], statsReceiver: StatsReceiver) =
-    this(service, statsReceiver, Logger.getLogger(getClass.getName))
+    this(service, statsReceiver, Logger.getLogger(getClass.getName), None)
   def this(service: Service[Req, Rep]) =
-    this(service, NullStatsReceiver)
+    this(service, NullStatsReceiver, None)
 
   private[this] val state = new AtomicReference[State](Idle)
   private[this] val onShutdownPromise = new Promise[Unit]
@@ -107,6 +110,11 @@ private[finagle] class ServiceToChannelHandler[Req, Rep](
       case e =>
         Channels.fireExceptionCaught(channel, e)
     }
+  }
+
+  override def channelConnected(ctx: ChannelHandlerContext, e: ChannelStateEvent) {
+    clientConnection.foreach { _.channel = ctx.getChannel }
+    service.connected()
   }
 
   override def channelClosed(ctx: ChannelHandlerContext, e: ChannelStateEvent) {

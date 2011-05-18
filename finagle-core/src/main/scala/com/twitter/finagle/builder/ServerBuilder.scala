@@ -242,11 +242,16 @@ class ServerBuilder[Req, Rep](val config: ServerConfig[Req, Rep]) {
   def build(service: Service[Req, Rep]): Server = build(() => service)
 
   /**
+   * Construct the Server, given the provided Service factory.
+   */
+  def build(serviceFactory: () => Service[Req, Rep]): Server = build(_ => serviceFactory())
+
+  /**
    * Construct the Server, given the provided ServiceFactory. This
    * is useful if the protocol is stateful (e.g., requires authentication
    * or supports transactions).
    */
-  def build(serviceFactory: () => Service[Req, Rep]): Server = {
+  def build(serviceFactory: ClientConnection => Service[Req, Rep]): Server = {
     config.assertValid()
 
     val scopedStatsReceiver =
@@ -363,8 +368,9 @@ class ServerBuilder[Req, Rep](val config: ServerConfig[Req, Rep]) {
         queueingChannelHandler foreach { pipeline.addLast("queue", _) }
 
         // Compose the service stack.
+        val clientConnection = new ClientConnection()
         var service: Service[Req, Rep] = {
-          val underlying = serviceFactory()
+          val underlying = serviceFactory(clientConnection)
           val prepared   = codec.prepareService(underlying)
           new ProxyService(prepared)
         }
@@ -411,7 +417,7 @@ class ServerBuilder[Req, Rep](val config: ServerConfig[Req, Rep]) {
         // complete (to drain them individually.)  Note: this would be
         // complicated by the presence of pipelining.
         val channelHandler = new ServiceToChannelHandler(
-          service, scopedStatsReceiver getOrElse NullStatsReceiver)
+          service, scopedStatsReceiver getOrElse NullStatsReceiver, Some(clientConnection))
 
         val handle = new ChannelHandle {
           def close() =

@@ -3,6 +3,8 @@ package com.twitter.finagle
 import com.twitter.util.Future
 
 import com.twitter.finagle.service.RefcountedService
+import java.net.SocketAddress
+import org.jboss.netty.channel.Channel
 
 /**
  * A Service is an asynchronous function from Request to Future[Response]. It is the
@@ -15,6 +17,7 @@ abstract class Service[-Req, +Rep] extends (Req => Future[Rep]) {
   def map[Req1](f: Req1 => Req) = new Service[Req1, Rep] {
     def apply(req1: Req1) = Service.this.apply(f(req1))
     override def release() = Service.this.release()
+    override def connected() = Service.this.connected()
   }
 
   /**
@@ -28,11 +31,26 @@ abstract class Service[-Req, +Rep] extends (Req => Future[Rep]) {
    */
   def release() = ()
 
+  def connected() = ()
+
   /**
    * Determines whether this service is available (can accept requests
    * with a reasonable likelihood of success).
    */
   def isAvailable: Boolean = true
+}
+
+class ClientConnection {
+  // tricky. we can't fill in the Channel till the first event call from netty.
+  private[finagle] var channel: Channel = null
+
+  def remoteAddress: SocketAddress = channel.getRemoteAddress
+
+  def localAddress: SocketAddress = channel.getLocalAddress
+
+  def close() {
+    channel.disconnect()
+  }
 }
 
 abstract class ServiceFactory[-Req, +Rep] {
@@ -114,6 +132,7 @@ abstract class Filter[-ReqIn, +RepOut, +ReqOut, -RepIn]
         Filter.this.apply(request, new Service[ReqOut, RepIn] {
           def apply(request: ReqOut): Future[RepIn] = next(request, service)
           override def release() = service.release()
+          override def connected() = service.connected()
           override def isAvailable = service.isAvailable
         })
       }
@@ -132,6 +151,7 @@ abstract class Filter[-ReqIn, +RepOut, +ReqOut, -RepIn]
 
     def apply(request: ReqIn) = Filter.this.apply(request, refcounted)
     override def release() = refcounted.release()
+    override def connected() = refcounted.connected()
     override def isAvailable = refcounted.isAvailable
   }
 
