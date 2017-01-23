@@ -1,6 +1,8 @@
 package com.twitter.finagle.http2.transport
 
+import com.twitter.finagle.param.Stats
 import com.twitter.finagle.Stack
+import com.twitter.finagle.http2.Settings
 import com.twitter.finagle.netty4.http.exp._
 import io.netty.channel.{Channel, ChannelHandlerContext, ChannelInitializer}
 import io.netty.handler.codec.http2.{Http2Codec, Http2ServerDowngrader}
@@ -8,6 +10,9 @@ import io.netty.handler.ssl.{ApplicationProtocolNames, ApplicationProtocolNegoti
 
 private[http2] class NpnOrAlpnHandler(init: ChannelInitializer[Channel], params: Stack.Params)
   extends ApplicationProtocolNegotiationHandler(ApplicationProtocolNames.HTTP_1_1) {
+
+  private[this] val Stats(statsReceiver) = params[Stats]
+  private[this] val upgradeCounter = statsReceiver.scope("upgrade").counter("success")
 
   @throws(classOf[Exception])
   protected def configurePipeline(ctx: ChannelHandlerContext, protocol: String) {
@@ -22,12 +27,14 @@ private[http2] class NpnOrAlpnHandler(init: ChannelInitializer[Channel], params:
             ch.pipeline.addLast(init)
           }
         }
+        upgradeCounter.incr()
 
         ctx.channel.config.setAutoRead(true)
+        val initialSettings = Settings.fromParams(params)
         ctx.pipeline().replace(
           HttpCodecName,
           "http2Codec",
-          new Http2Codec(true /* server */ , initializer))
+          new Http2Codec(true /* server */ , initializer, initialSettings))
 
       case ApplicationProtocolNames.HTTP_1_1 =>
       // The Http codec is already in the pipeline, so we are good!

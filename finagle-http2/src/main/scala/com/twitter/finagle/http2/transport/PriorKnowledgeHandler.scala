@@ -1,7 +1,9 @@
 package com.twitter.finagle.http2.transport
 
 import com.twitter.finagle.Stack
+import com.twitter.finagle.http2.Settings
 import com.twitter.finagle.netty4.http.exp._
+import com.twitter.finagle.param.Stats
 import com.twitter.logging.Logger
 import io.netty.buffer.{ByteBufUtil, ByteBuf}
 import io.netty.channel.{Channel, ChannelInitializer, ChannelHandlerContext, ChannelInboundHandlerAdapter}
@@ -25,6 +27,9 @@ private[http2] class PriorKnowledgeHandler(
 
   val prefaceToRead: ByteBuf = connectionPrefaceBuf
   var bytesConsumed: Integer = 0
+
+  private[this] val Stats(statsReceiver) = params[Stats]
+  private[this] val upgradeCounter = statsReceiver.scope("upgrade").counter("success")
 
   override def channelRead(ctx: ChannelHandlerContext, msg: Object): Unit = {
 
@@ -61,9 +66,11 @@ private[http2] class PriorKnowledgeHandler(
         if (!prefaceToRead.isReadable()) {
           // Entire preface has been read.
           prefaceToRead.release()
+          upgradeCounter.incr()
 
           // we have read a complete preface. Setup HTTP/2 pipeline.
-          p.replace(HttpCodecName, "http2Codec", new Http2Codec(true /* server */ , initializer))
+          val initialSettings = Settings.fromParams(params)
+          p.replace(HttpCodecName, "http2Codec", new Http2Codec(true /* server */ , initializer, initialSettings))
           p.remove("upgradeHandler")
 
           // Since we changed the pipeline, our current ctx points to the wrong handler

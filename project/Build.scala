@@ -20,7 +20,7 @@ object Finagle extends Build {
 
   val libthriftVersion = "0.5.0-7"
 
-  val netty4Version = "4.1.6.Final"
+  val netty4Version = "4.1.7.Final"
 
   val guavaLib = "com.google.guava" % "guava" % "16.0.1"
   val caffeineLib = "com.github.ben-manes.caffeine" % "caffeine" % "2.3.4"
@@ -258,6 +258,7 @@ object Finagle extends Build {
       util("lint"),
       util("logging"),
       util("registry"),
+      util("security"),
       util("stats"),
       caffeineLib,
       jsr305Lib,
@@ -365,10 +366,12 @@ object Finagle extends Build {
     name := "finagle-commons-stats",
     libraryDependencies ++= Seq(
       "com.twitter.common" % "stats" % "0.0.115",
+      util("core"),
       util("registry"),
       util("stats")
-    )
-  ).dependsOn(finagleCore)
+    ),
+    libraryDependencies ++= jacksonLibs
+  ).dependsOn(finagleCore, finagleHttp)
 
   lazy val finagleServersets = Project(
     id = "finagle-serversets",
@@ -589,7 +592,7 @@ object Finagle extends Build {
     finagleThrift,
     finagleThriftMux,
     finagleToggle)
-  
+
   lazy val finagleRedis = Project(
     id = "finagle-redis",
     base = file("finagle-redis"),
@@ -718,6 +721,7 @@ object Finagle extends Build {
     finagleExp,
     finagleMemcached,
     finagleMux,
+    finagleNetty4,
     finagleOstrich4,
     finagleStats,
     finagleThriftMux,

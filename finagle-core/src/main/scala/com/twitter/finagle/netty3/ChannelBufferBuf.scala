@@ -16,20 +16,20 @@ import org.jboss.netty.buffer.{ChannelBuffers, ChannelBuffer}
  * [[com.twitter.io.Buf]] interface.
  */
 class ChannelBufferBuf(protected val underlying: ChannelBuffer) extends Buf {
-  def length = underlying.readableBytes
+  def length: Int = underlying.readableBytes
 
-  override def toString = s"ChannelBufferBuf($underlying)"
+  override def toString: String = s"ChannelBufferBuf($underlying)"
 
   def write(bytes: Array[Byte], off: Int): Unit = {
+    checkWriteArgs(bytes.length, off)
     val dup = underlying.duplicate()
     dup.readBytes(bytes, off, dup.readableBytes)
   }
 
   def slice(i: Int, j: Int): Buf = {
-    require(i >=0 && j >= 0, "Index out of bounds")
-
-    if (j <= i || i >= length) Buf.Empty
-    else if (i == 0 && j >= length) this
+    checkSliceArgs(i, j)
+    if (isSliceEmpty(i, j)) Buf.Empty
+    else if (isSliceIdentity(i, j)) this
     else {
       val from = i + underlying.readerIndex
       val until = math.min(j-i, length-i)
@@ -39,7 +39,7 @@ class ChannelBufferBuf(protected val underlying: ChannelBuffer) extends Buf {
 
   override def equals(other: Any): Boolean = other match {
     case ChannelBufferBuf(otherCB) => underlying.equals(otherCB)
-    case other: Buf =>  Buf.equals(this, other)
+    case other: Buf => Buf.equals(this, other)
     case _ => false
   }
 
@@ -65,8 +65,8 @@ object ChannelBufferBuf {
    */
   def coerce(buf: Buf): ChannelBufferBuf = buf match {
     case buf: ChannelBufferBuf => buf
-    case buf if buf.isEmpty => ChannelBufferBuf.Empty
-    case buf =>
+    case _ if buf.isEmpty => ChannelBufferBuf.Empty
+    case _ =>
       val Buf.ByteArray.Owned(bytes, begin, end) = Buf.ByteArray.coerce(buf)
       val cb = ChannelBuffers.wrappedBuffer(bytes, begin, end - begin)
       new ChannelBufferBuf(cb)
@@ -91,9 +91,9 @@ object ChannelBufferBuf {
      * @see [[newOwned]] for a Java friendly API.
      */
     def apply(cb: ChannelBuffer): Buf = cb match {
-      case cb if cb.readableBytes == 0 => Buf.Empty
+      case _ if cb.readableBytes == 0 => Buf.Empty
       case BufChannelBuffer(buf) => buf
-      case cb => new ChannelBufferBuf(cb)
+      case _ => new ChannelBufferBuf(cb)
     }
 
     /** Extract the buffer's underlying ChannelBuffer. It should not be mutated. */

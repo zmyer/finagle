@@ -1,8 +1,8 @@
 package com.twitter.finagle.client
 
-import com.twitter.finagle.{Filter, Stack, Service, ServiceFactory}
+import com.twitter.finagle.{Filter, Service, ServiceFactory, Stack}
 import com.twitter.finagle.param
-import com.twitter.finagle.service.TimeoutFilter
+import com.twitter.finagle.service.{StatsFilter, TimeoutFilter}
 
 private[finagle] object MethodBuilder {
 
@@ -19,6 +19,12 @@ private[finagle] object MethodBuilder {
     dest: String,
     stackClient: StackClient[Req, Rep]
   ): MethodBuilder[Req, Rep] = {
+    val params = stackClient.params
+    val clientName = params[param.Label].label match {
+      case param.Label.Default => dest
+      case label => label
+    }
+
     val needsTotalTimeoutModule =
       stackClient.stack.contains(TimeoutFilter.totalTimeoutRole)
     val service: Service[Req, Rep] = stackClient
@@ -27,6 +33,7 @@ private[finagle] object MethodBuilder {
       .newService(dest, param.Label.Default)
     new MethodBuilder[Req, Rep](
       service,
+      clientName,
       stackClient.params,
       Config.create(stackClient.params, needsTotalTimeoutModule))
   }
@@ -34,8 +41,11 @@ private[finagle] object MethodBuilder {
   private[this] def modified[Req, Rep](
     stack: Stack[ServiceFactory[Req, Rep]]
   ): Stack[ServiceFactory[Req, Rep]] = {
-    // this is managed directly by us, so that we can put it in the right location
-    stack.remove(TimeoutFilter.totalTimeoutRole)
+    stack
+      // total timeouts are managed directly by MethodBuilder
+      .remove(TimeoutFilter.totalTimeoutRole)
+      // allow for dynamic per-request timeouts
+      .replace(TimeoutFilter.role, DynamicTimeout.perRequestModule[Req, Rep])
   }
 
   private object Config {
@@ -60,6 +70,7 @@ private[finagle] object MethodBuilder {
  */
 private[finagle] class MethodBuilder[Req, Rep] private (
     service: Service[Req, Rep],
+    clientName: String,
     private[client] val params: Stack.Params,
     private[client] val config: MethodBuilder.Config[Req, Rep]) { self =>
   import MethodBuilder._
@@ -71,20 +82,21 @@ private[finagle] class MethodBuilder[Req, Rep] private (
   /**
    * Configure the application-level retry policy.
    *
-   * For example, retrying on `Exception` responses:
-   * {{{
-   * import com.twitter.finagle.client.MethodBuilder
-   * import com.twitter.util.Try
-   *
-   * val builder: MethodBuilder[Int, Int] = ???
-   * builder.withRetry.forResponse {
-   *   case Throw(_) => true
-   * }
-   * }}}
-   *
    * Defaults to using the client's [[com.twitter.finagle.service.ResponseClassifier]]
    * to retry failures
    * [[com.twitter.finagle.service.ResponseClass.RetryableFailure marked as retryable]].
+   *
+   * @example Retrying on `Exception` responses:
+   * {{{
+   * import com.twitter.finagle.client.MethodBuilder
+   * import com.twitter.finagle.service.{ReqRep, ResponseClass}
+   * import com.twitter.util.Throw
+   *
+   * val builder: MethodBuilder[Int, Int] = ???
+   * builder.withRetry.forClassifier {
+   *   case ReqRep(_, Throw(_)) => ResponseClass.RetryableFailure
+   * }
+   * }}}
    *
    * @see [[MethodBuilderRetry]]
    */
@@ -94,7 +106,9 @@ private[finagle] class MethodBuilder[Req, Rep] private (
   /**
    * Configure the timeouts.
    *
-   * For example, a total timeout of 200 milliseconds:
+   * Defaults to having no timeouts set.
+   *
+   * @example A total timeout of 200 milliseconds:
    * {{{
    * import com.twitter.conversions.time._
    * import com.twitter.finagle.client.MethodBuilder
@@ -103,7 +117,14 @@ private[finagle] class MethodBuilder[Req, Rep] private (
    * builder.withTimeout.total(200.milliseconds)
    * }}}
    *
-   * Defaults to having no timeouts set.
+   * @example A per-request timeout of 50 milliseconds:
+   * {{{
+   * import com.twitter.conversions.time._
+   * import com.twitter.finagle.client.MethodBuilder
+   *
+   * val builder: MethodBuilder[Int, Int] = ???
+   * builder.withTimeout.perRequest(50.milliseconds)
+   * }}}
    *
    * @see [[MethodBuilderTimeout]]
    */
@@ -127,26 +148,34 @@ private[finagle] class MethodBuilder[Req, Rep] private (
   //
 
   private[client] def withConfig(config: Config[Req, Rep]): MethodBuilder[Req, Rep] =
-    new MethodBuilder(self.service, self.params, config)
+    new MethodBuilder(
+      self.service,
+      self.clientName,
+      self.params,
+      config)
 
   private[this] def filter(name: String): Filter[Req, Rep, Req, Rep] = {
     // Ordering of filters:
     // Requests start at the top and traverse down.
     // Responses flow back from the bottom up.
     //
-    // - Failure recovery (TODO)
-    // - Logical Stats (TODO)
+    // - Logical Stats
     // - Total Timeout
     // - Retries
-    // - Service (Finagle client's stack, including Per Request Timeout (TODO))
+    // - Service (Finagle client's stack, including Per Request Timeout)
 
-    val stats = params[param.Stats].statsReceiver.scope(name)
+    val stats = params[param.Stats].statsReceiver.scope(clientName, name)
 
-    val totalTimeoutFilter = withTimeout.totalFilter
-    val retryFilter = withRetry.filter(stats)
+    val statsFilter = new StatsFilter[Req, Rep](
+      stats.scope("logical"),
+      params[param.ResponseClassifier].responseClassifier,
+      params[param.ExceptionStatsHandler].categorizer,
+      params[StatsFilter.Param].unit)
 
-    totalTimeoutFilter
-      .andThen(retryFilter)
+    statsFilter
+      .andThen(withTimeout.totalFilter)
+      .andThen(withRetry.filter(stats))
+      .andThen(withTimeout.perRequestFilter)
   }
 
 }

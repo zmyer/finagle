@@ -7,11 +7,87 @@ Note that ``RB_ID=#`` correspond to associated messages in commits.
 6.x
 -----
 
+New Features
+~~~~~~~~~~~~
+
+  * finagle-commons-stats: Provide a TwitterServer exporter for commons stats.
+    This simplifies migration for folks who don't want to switch to
+    commons metrics and TwitterServer in one go.  It will export stats on the
+    /vars.json endpoint.  ``RB_ID=902921``
+
+  * finagle-http: Introduce `HeaderMap.getOrNull(header)`, a Java-friendly variant of
+    `HeaderMap.get(header).orNull`.  ``RB_ID=904093``
+
+Breaking API Changes
+~~~~~~~~~~~~~~~~~~~~
+
+  * finagle-base-http: `Message.write(ChannelBuffer)` has been replaced with a method that
+    receives a `Buf`. The semantics of calling the `write` method on chunked messages has
+    changed from potentially throwing an exception based on the state of the `Writer` to
+    always throwing an `IllegalStateException`. Existing users of the `write(..)` methods
+    on chunked messages should use the `Writer` directly. ``RB_ID=900091``
+
+  * finagle-memcached: Remove deprecated methods on `c.t.f.memcached.Client`:
+      - `apply(group: Group[SocketAddress])`
+      - `apply(cluster: Cluster[SocketAddress])`
+
+    Use `c.t.f.Memcached.client` to create a Memcached client. ``RB_ID=899331``
+
+  * finagle-toggle: `ToggleMap` `Toggles` now rehash the inputs to
+    `apply` and `isDefinedAt` in order to promote a relatively even
+    distribution even when the inputs do not have a good distribution.
+    This allows users to get away with using a poor hashing function
+    such as `String.hashCode`. ``RB_ID=899195``
+
+Deprecations
+~~~~~~~~~~~~
+
+  * finagle-base-http: Deprecate `c.t.f.http.Message.ContentTypeWwwFrom`.
+    Use `c.t.f.http.Message.ContentTypeWwwForm` instead. ``RB_ID=901041``
+
+  * finagle-base-http: Deprecate the lazy `response: Response` field on the Request type.
+    This field is potentially hazardous as it's not necessarily the Response that will
+    be returned by a Service but it is often used as such. Construct a Response using
+    the static constructor methods. ``RB_ID=899983``
+
+  * finagle-http: Deprecate ValidateRequestFilter which now has limited utility.
+    See entry in Runtime Behavior Changes. If this is still needed, copy the remaining
+    behavior into a new filter. ``RB_ID=899895``
+
+  * finagle-memcached: Deprecate methods on `c.t.f.memcached.Client`:
+      - `apply(name: Name)`
+      - `apply(host: String)`
+
+    Use `c.t.f.Memcached.client` to create a Memcached client. `RB_ID=899331``
+
+  * finagle-memcached: Deprecate `c.t.f.memcached.protocol.text.Memcached` object.
+    Use `c.t.f.Memcached.client` to create Memcached clients. ``RB_ID=899009``
+
 Runtime Behavior Changes
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
+  * finagle-http: ValidateRequestFilter doesn't look for the uri "/bad-http-request" which
+    had been indicative of the netty3 http codec giving up on decoding a http request. These
+    events are caught lower in the pipeline and should not bubble up to the level of this
+    filter. ``RB_ID=899895``
+
   * finagle-redis: Transport implementation is now based on Netty 4 (instead of Netty 3).
     ``RB_ID=895728``
+
+  * finagle-toggle: `ToggleMap` `Toggles` now rehash the inputs to
+    `apply` and `isDefinedAt` in order to promote a relatively even
+    distribution even when the inputs do not have a good distribution.
+    This allows users to get away with using a poor hashing function
+    such as `String.hashCode`. ``RB_ID=899195``
+
+Bug Fixes
+~~~~~~~~~
+
+  * finagle-core: Properly compute length when converting a `Buf.ByteArray`
+    to a Netty 4 `ByteBuf`. ``RB_ID=901605``
+
+  * finagle-memcached: AtomicMap change lock function to synchronize on map
+    object. ``DIFF_ID=D18735``
 
 6.41.0
 ------
@@ -30,10 +106,18 @@ Breaking API Changes
     is a SAM.  Because of the order in which SAMs get resolved, literal
     functions in scala will get confused about which method they should use.
     Instead of passing a Function directly, wrap the Function with a Service.mk.
-    ``RB_ID=896524``.
+    ``RB_ID=896524``
 
   * finagle-core: `CancelledWriteException` was removed as it is no longer used.
   ``RB_ID=896757``
+
+  * finagle-core: The structure of Context and its subtypes, LocalContext and
+    MarshalledContext, have been significantly refined, eliminating StackOverflowErrors
+    and memory leaks while also refining the API. The `letClear()` method, which cleared all
+    items from the context, has been renamed to `letClearAll` to avoid confusion with other
+    `letClear` methods which clear individual keys. The bulk `letClear` method now takes
+    a collection of `Key[_]`s, making it usable from Java. Bulk `let` operations can now be
+    done using a collection of `KeyValuePair`s. ``RB_ID=896663``
 
   * finagle-kestrel: The `codec` method has been removed from the kestrel
     MultiReader object. Configure a ClientBuilder protocol using the default

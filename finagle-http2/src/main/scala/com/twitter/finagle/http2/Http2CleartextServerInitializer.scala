@@ -4,6 +4,7 @@ import com.twitter.finagle.http
 import com.twitter.finagle.Stack
 import com.twitter.finagle.http2.transport.PriorKnowledgeHandler
 import com.twitter.finagle.netty4.http.exp.{HttpCodecName, initServer}
+import com.twitter.finagle.param.Stats
 import com.twitter.logging.Logger
 import io.netty.channel.socket.SocketChannel
 import io.netty.channel.{Channel, ChannelHandlerContext, ChannelInitializer,
@@ -22,6 +23,9 @@ private[http2] class Http2CleartextServerInitializer(
     init: ChannelInitializer[Channel],
     params: Stack.Params)
   extends ChannelInitializer[SocketChannel] {
+
+  private[this] val Stats(statsReceiver) = params[Stats]
+  private[this] val upgradeCounter = statsReceiver.scope("upgrade").counter("success")
 
   val initializer = new ChannelInitializer[Channel] {
     def initChannel(ch: Channel): Unit = {
@@ -43,9 +47,10 @@ private[http2] class Http2CleartextServerInitializer(
   val upgradeCodecFactory: UpgradeCodecFactory = new UpgradeCodecFactory {
     override def newUpgradeCodec(protocol: CharSequence): UpgradeCodec = {
       if (AsciiString.contentEquals(Http2CodecUtil.HTTP_UPGRADE_PROTOCOL_NAME, protocol)) {
-
-        new Http2ServerUpgradeCodec(new Http2Codec(true /* server */, initializer)) {
+        val initialSettings = Settings.fromParams(params)
+        new Http2ServerUpgradeCodec(new Http2Codec(true /* server */, initializer, initialSettings)) {
           override def upgradeTo(ctx: ChannelHandlerContext, upgradeRequest: FullHttpRequest) {
+            upgradeCounter.incr()
             // we turn off backpressure because Http2 only works with autoread on for now
             ctx.channel.config.setAutoRead(true)
             super.upgradeTo(ctx, upgradeRequest)

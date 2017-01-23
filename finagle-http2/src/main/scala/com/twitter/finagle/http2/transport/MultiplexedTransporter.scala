@@ -1,11 +1,11 @@
 package com.twitter.finagle.http2.transport
 
 import com.twitter.concurrent.AsyncQueue
-import com.twitter.finagle.{Status, StreamClosedException}
+import com.twitter.finagle.{Status, StreamClosedException, FailureFlags}
 import com.twitter.finagle.http2.transport.Http2ClientDowngrader._
 import com.twitter.finagle.transport.Transport
 import com.twitter.finagle.util.DefaultTimer
-import com.twitter.logging.Logger
+import com.twitter.logging.{Logger, HasLogLevel, Level}
 import com.twitter.util.{Future, Time, Promise, Return, Throw, Try}
 import io.netty.handler.codec.http.{HttpObject, LastHttpContent}
 import io.netty.handler.codec.http2.Http2Error
@@ -21,19 +21,28 @@ import scala.collection.JavaConverters._
  * After a stream finishes, the transport represents the next stream id.
  *
  * Since each transport only represents a single stream at a time, one of these
- * transports cannot be multiplexed-instead, the MultiplexedTransport is the
- * unit of Multiplexing, so if you want to increase concurrency, you should
+ * transports cannot be multiplexed-instead, the ChildTransport is the
+ * unit of multiplexing, so if you want to increase concurrency, you should
  * create a new Transport.
  */
 private[http2] class MultiplexedTransporter(
     underlying: Transport[StreamMessage, StreamMessage],
     addr: SocketAddress)
-  extends (() => Transport[HttpObject, HttpObject]) {
+  extends (() => Try[Transport[HttpObject, HttpObject]]) { self =>
+
+  import MultiplexedTransporter._
 
   private[this] val log = Logger.get(getClass.getName)
   private[this] val queues: ConcurrentHashMap[Int, AsyncQueue[HttpObject]] =
     new ConcurrentHashMap[Int, AsyncQueue[HttpObject]]()
   private[this] val id = new AtomicInteger(1)
+
+  // synchronized by this
+  private[this] var curStreams = 0
+  private[this] var dead = false
+
+  // exposed for testing
+  private[http2] def setStreamId(num: Int): Unit = id.set(num)
 
   // TODO: the correct goaway behavior is to wait for requests lower than
   // lastStreamId and assume everything higher will never see a response.
@@ -104,7 +113,7 @@ private[http2] class MultiplexedTransporter(
    * just need a response to advance to the next stream.
    */
   def first(): Transport[HttpObject, HttpObject] = {
-    val ct = new ChildTransport()
+    val ct = createChildTransport()
 
     ct.synchronized {
       ct.finishedWriting = true
@@ -113,8 +122,26 @@ private[http2] class MultiplexedTransporter(
     ct
   }
 
-  def apply(): Transport[HttpObject, HttpObject] =
-    new ChildTransport()
+  private[this] def createChildTransport(): ChildTransport = self.synchronized {
+    val ct = new ChildTransport()
+    curStreams += 1
+    ct.onClose.ensure {
+      self.synchronized {
+        curStreams -= 1
+        if (curStreams == 0) {
+          dead = true
+          underlying.close()
+        }
+      }
+    }
+
+    ct
+  }
+
+  def apply(): Try[Transport[HttpObject, HttpObject]] = self.synchronized {
+    if (dead) Throw(new DeadConnectionException(addr, FailureFlags.Retryable))
+    else Return(createChildTransport())
+  }
 
   def onClose: Future[Throwable] = underlying.onClose
 
@@ -128,22 +155,21 @@ private[http2] class MultiplexedTransporter(
   // connections.  This can be improved by adding an extra layer between pooling
   // and dispatching, or making the distinction between streams and sessions
   // explicit.
-  private[http2] class ChildTransport
-    extends Transport[HttpObject, HttpObject] { child =>
+  private[http2] class ChildTransport extends Transport[HttpObject, HttpObject] { child =>
+
+    private[this] val _onClose: Promise[Throwable] = Promise[Throwable]()
 
     // all of these mutable fields are protected by synchronization on the
     // child class.
 
-    // see http://httpwg.org/specs/rfc7540.html#StreamIdentifiers
-    // stream ids initiated by the client must be odd
-    // these are synchronized on self
-    private[this] var curId = id.getAndAdd(2)
-    private[this] var queue = tryToInitializeQueue(curId)
+    // we're going to fix this immediately in incrementStream
+    private[this] var curId = 0
+    private[this] var queue: AsyncQueue[HttpObject] = null
 
     // we keep track of the next read explicitly here to ensure
     // that we notice when the stream is killed
-    private[this] var nextRead: Future[HttpObject] = queue.poll()
-    handleCloses(nextRead)
+    private[this] var nextRead: Future[HttpObject] = null
+    incrementStream()
 
     private[MultiplexedTransporter] var finishedWriting = false
     private[this] var finishedReading = false
@@ -179,12 +205,27 @@ private[http2] class MultiplexedTransporter(
         if (result == null) {
           log.error(s"Expected to remove stream id: $curId but it wasn't there")
         }
-        curId = id.getAndAdd(2)
+        incrementStream()
+      }
+    }
+
+    // see http://httpwg.org/specs/rfc7540.html#StreamIdentifiers
+    private[this] def incrementStream(): Unit = child.synchronized {
+      curId = id.getAndAdd(2)
+
+      // if you run out of integers, you must make a new connection
+      if (curId < 0) {
+        close()
+        _onClose.updateIfEmpty(Return(new StreamIdOverflowException(addr)))
+      } else if (curId % 2 != 1) { // stream ids initiated by the client must be odd
+        val exn = new IllegalStreamIdException(addr, curId)
+        close()
+        _onClose.updateIfEmpty(Return(exn))
+        log.error(exn, s"id $id was not odd, but client-side ids must be odd. this is a bug.")
+      } else {
         queue = tryToInitializeQueue(curId)
         nextRead = queue.poll()
-        if (curId % 2 != 1) {
-          log.error(s"id $id was not odd, but client-side ids must be odd. this is a bug.")
-        }
+        handleCloses(nextRead)
       }
     }
 
@@ -219,8 +260,6 @@ private[http2] class MultiplexedTransporter(
 
     def status: Status = if (dead) Status.Closed else underlying.status
 
-    private[this] val _onClose: Promise[Throwable] = Promise[Throwable]()
-
     def onClose: Future[Throwable] = _onClose.or(underlying.onClose)
 
     def localAddress: SocketAddress = underlying.localAddress
@@ -240,10 +279,48 @@ private[http2] class MultiplexedTransporter(
               .ensure {
                 tryToInitializeQueue(curId).fail(new StreamClosedException(addr, curId.toString))
               }
+          } else {
+            tryToInitializeQueue(curId).fail(new StreamClosedException(addr, curId.toString))
           }
         }
       }
       _onClose.unit
     }
+  }
+}
+
+private[http2] object MultiplexedTransporter {
+  class DeadConnectionException(
+      addr: SocketAddress,
+      private[finagle] val flags: Long)
+    extends Exception(s"assigned an already dead connection to address $addr")
+    with FailureFlags[DeadConnectionException] {
+
+    protected def copyWithFlags(newFlags: Long): DeadConnectionException =
+      new DeadConnectionException(addr, newFlags)
+  }
+
+  class StreamIdOverflowException(
+      addr: SocketAddress,
+      private[finagle] val flags: Long = FailureFlags.Retryable)
+    extends Exception(s"ran out of stream ids for address $addr")
+    with FailureFlags[StreamIdOverflowException]
+    with HasLogLevel {
+    def logLevel: Level = Level.INFO // this is normal behavior, so we should log gently
+    protected def copyWithFlags(flags: Long): StreamIdOverflowException =
+      new StreamIdOverflowException(addr, flags)
+  }
+
+  class IllegalStreamIdException(
+      addr: SocketAddress,
+      id: Int,
+      private[finagle] val flags: Long = FailureFlags.Retryable)
+    extends Exception(s"Found an invalid stream id $id on address $addr. "
+      + "The id was even, but client initiated stream ids must be odd.")
+    with FailureFlags[IllegalStreamIdException]
+    with HasLogLevel {
+    def logLevel: Level = Level.ERROR
+    protected def copyWithFlags(flags: Long): IllegalStreamIdException =
+      new IllegalStreamIdException(addr, id, flags)
   }
 }
