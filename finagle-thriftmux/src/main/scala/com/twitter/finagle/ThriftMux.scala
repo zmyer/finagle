@@ -1,15 +1,15 @@
 package com.twitter.finagle
 
-import com.twitter.finagle.client.{StackClient, StackBasedClient}
+import com.twitter.finagle.client.{ClientRegistry, StackBasedClient, StackClient}
 import com.twitter.finagle.mux.lease.exp.Lessor
-import com.twitter.finagle.param.{Monitor => _, ResponseClassifier => _, ExceptionStatsHandler => _, Tracer => _, _}
-import com.twitter.finagle.server.{StackBasedServer, Listener, StackServer, StdStackServer}
+import com.twitter.finagle.param.{ExceptionStatsHandler => _, Monitor => _, ResponseClassifier => _, Tracer => _, _}
+import com.twitter.finagle.server.{Listener, StackBasedServer, StackServer, StdStackServer}
 import com.twitter.finagle.service._
 import com.twitter.finagle.stats.{ClientStatsReceiver, ExceptionStatsHandler, ServerStatsReceiver, StatsReceiver}
 import com.twitter.finagle.thrift.{ClientId, ThriftClientRequest, UncaughtAppExceptionFilter}
 import com.twitter.finagle.thriftmux.service.ThriftMuxResponseClassifier
-import com.twitter.finagle.tracing.{Tracer, Trace}
-import com.twitter.finagle.transport.{Transport, StatsTransport}
+import com.twitter.finagle.tracing.{Trace, Tracer}
+import com.twitter.finagle.transport.{StatsTransport, Transport}
 import com.twitter.io.Buf
 import com.twitter.util._
 import java.net.SocketAddress
@@ -23,7 +23,7 @@ import scala.util.control.NonFatal
  * `com.twitter.finagle.Server` for the Thrift protocol served over
  * [[com.twitter.finagle.mux]]. Rich interfaces are provided to adhere to those
  * generated from a [[http://thrift.apache.org/docs/idl/ Thrift IDL]] by
- * [[http://twitter.github.io/scrooge/ Scrooge]] or
+ * [[https://twitter.github.io/scrooge/ Scrooge]] or
  * [[https://github.com/mariusaeriksen/thrift-0.5.0-finagle thrift-finagle]].
  *
  * == Clients ==
@@ -80,7 +80,7 @@ import scala.util.control.NonFatal
  * This object does not expose any configuration options. Both clients and servers
  * are instantiated with sane defaults. Clients are labeled with the "clnt/thrift"
  * prefix and servers with "srv/thrift". If you'd like more configuration, see the
- * [[http://twitter.github.io/finagle/guide/Configuration.html#clients-and-servers
+ * [[https://twitter.github.io/finagle/guide/Configuration.html#clients-and-servers
  * configuration documentation]].
  */
 object ThriftMux
@@ -137,9 +137,9 @@ object ThriftMux
   /**
    * A ThriftMux `com.twitter.finagle.Client`.
    *
-   * @see [[http://twitter.github.io/finagle/guide/Configuration.html#clients-and-servers Configuration]] documentation
-   * @see [[http://twitter.github.io/finagle/guide/Protocols.html#thrift Thrift]] documentation
-   * @see [[http://twitter.github.io/finagle/guide/Protocols.html#mux Mux]] documentation
+   * @see [[https://twitter.github.io/finagle/guide/Configuration.html#clients-and-servers Configuration]] documentation
+   * @see [[https://twitter.github.io/finagle/guide/Protocols.html#thrift Thrift]] documentation
+   * @see [[https://twitter.github.io/finagle/guide/Protocols.html#mux Mux]] documentation
    */
   case class Client(
       muxer: StackClient[mux.Request, mux.Response] = Mux.client.copy(stack = BaseClientStack)
@@ -202,7 +202,7 @@ object ThriftMux
       withStack(stackable +: stack)
     }
 
-    private[this] val Thrift.param.ClientId(clientId) = params[Thrift.param.ClientId]
+    private[this] def clientId: Option[ClientId] = params[Thrift.param.ClientId].clientId
 
     private[this] object ThriftMuxToMux extends Filter[ThriftClientRequest, Array[Byte], mux.Request, mux.Response] {
       def apply(req: ThriftClientRequest, service: Service[mux.Request, mux.Response]): Future[Array[Byte]] = {
@@ -238,11 +238,35 @@ object ThriftMux
       muxer.configured(param.ResponseClassifier(classifier))
     }
 
-    def newService(dest: Name, label: String): Service[ThriftClientRequest, Array[Byte]] =
+    def newService(dest: Name, label: String): Service[ThriftClientRequest, Array[Byte]] = {
+      clientId.foreach(id => ClientRegistry.export(params, "ClientId", id.name))
       ThriftMuxToMux andThen deserializingClassifier.newService(dest, label)
+    }
 
-    def newClient(dest: Name, label: String): ServiceFactory[ThriftClientRequest, Array[Byte]] =
+    def newClient(dest: Name, label: String): ServiceFactory[ThriftClientRequest, Array[Byte]] = {
+      clientId.foreach(id => ClientRegistry.export(params, "ClientId", id.name))
       ThriftMuxToMux andThen deserializingClassifier.newClient(dest, label)
+    }
+
+    /**
+     * '''Experimental:''' This API is under construction.
+     *
+     * Create a [[thriftmux.MethodBuilder]] for a given destination.
+     *
+     * @see [[https://twitter.github.io/finagle/guide/MethodBuilder.html user guide]]
+     */
+    def methodBuilder(dest: String): thriftmux.MethodBuilder =
+      thriftmux.MethodBuilder.from(dest, this)
+
+    /**
+     * '''Experimental:''' This API is under construction.
+     *
+     * Create a [[thriftmux.MethodBuilder]] for a given destination.
+     *
+     * @see [[https://twitter.github.io/finagle/guide/MethodBuilder.html user guide]]
+     */
+    def methodBuilder(dest: Name): thriftmux.MethodBuilder =
+      thriftmux.MethodBuilder.from(dest, this)
 
     // Java-friendly forwarders
     // See https://issues.scala-lang.org/browse/SI-8905
@@ -392,7 +416,7 @@ object ThriftMux
       }
 
     // Convert unhandled exceptions to TApplicationExceptions, but pass
-    // com.twitter.finagle.Failures to mux for transmission.
+    // com.twitter.finagle.FailureFlags to mux for transmission.
     private[this] class ExnFilter(protocolFactory: TProtocolFactory)
       extends SimpleFilter[mux.Request, mux.Response]
     {
@@ -401,7 +425,7 @@ object ThriftMux
         service: Service[mux.Request, mux.Response]
       ): Future[mux.Response] =
         service(request).rescue {
-          case f: Failure => Future.exception(f)
+          case f: FailureFlags[_] => Future.exception(f)
           case e if !e.isInstanceOf[TException] =>
             val msg = UncaughtAppExceptionFilter.writeExceptionMessage(
               request.body, e, protocolFactory)
@@ -428,9 +452,9 @@ object ThriftMux
   /**
    * A ThriftMux `com.twitter.finagle.Server`.
    *
-   * @see [[http://twitter.github.io/finagle/guide/Configuration.html#clients-and-servers Configuration]] documentation
-   * @see [[http://twitter.github.io/finagle/guide/Protocols.html#thrift Thrift]] documentation
-   * @see [[http://twitter.github.io/finagle/guide/Protocols.html#mux Mux]] documentation
+   * @see [[https://twitter.github.io/finagle/guide/Configuration.html#clients-and-servers Configuration]] documentation
+   * @see [[https://twitter.github.io/finagle/guide/Protocols.html#thrift Thrift]] documentation
+   * @see [[https://twitter.github.io/finagle/guide/Protocols.html#mux Mux]] documentation
    */
   case class Server(
       muxer: StackServer[mux.Request, mux.Response] = serverMuxer)

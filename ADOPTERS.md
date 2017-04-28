@@ -17,6 +17,7 @@ URLs if possible) and [submit a pull request][1]!
 * [DICE](http://dice.se/)
 * [Dwango](http://dwango.co.jp/)
 * [EnerNOC](https://www.enernoc.com/)
+* [Fitbit](https://www.fitbit.com/)
 * [Foursquare](https://foursquare.com/)
 * [Gigya](https://www.gigya.com/)
 * [Globo.com](http://globo.com/)
@@ -45,6 +46,7 @@ URLs if possible) and [submit a pull request][1]!
   * [Thor, a Finagle-based image processor][4]
 * [Reputation.com](https://www.reputation.com/)
 * [Sabre Labs](http://sabrelabs.com/)
+* [Salesforce](https://www.salesforce.com/)
 * [Sharethrough](https://www.sharethrough.com/)
   * ["Finagle @ Sharethrough: Twitter #Conf Presentation"][5]
 * [SmartNews](https://www.smartnews.com/en/)

@@ -26,6 +26,7 @@ public API breaks and changes in runtime behavior.
 * Source: https://github.com/twitter/finagle/
 * Mailing List: [finaglers@googlegroups.com](https://groups.google.com/forum/#!forum/finaglers)
 * Chat: https://gitter.im/twitter/finagle
+* Blog: https://finagle.github.io/blog/
 
 Finagle is an extensible RPC system for the JVM, used to construct
 high-concurrency servers. Finagle implements uniform client and server APIs for
@@ -35,7 +36,7 @@ protocols.
 
 For extensive documentation, please see the
 [user guide](https://twitter.github.io/finagle/guide/) and
-[API documentation](https://twitter.github.io/finagle/docs/#com.twitter.finagle.package)
+[API documentation](https://twitter.github.io/finagle/docs/com/twitter/finagle)
 websites. Documentation improvements are always welcome, so please send patches
 our way.
 

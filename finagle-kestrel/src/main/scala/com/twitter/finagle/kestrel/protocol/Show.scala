@@ -3,43 +3,6 @@ package com.twitter.finagle.kestrel.protocol
 import com.twitter.finagle.memcached.protocol.text._
 import com.twitter.io.Buf
 import com.twitter.util.Duration
-import org.jboss.netty.channel._
-import org.jboss.netty.handler.codec.oneone.OneToOneEncoder
-
-private[finagle] object ResponseToEncoding {
-  private val ZERO          = "0"
-  private val VALUE         = "VALUE"
-  private val ZeroCb        = Buf.Utf8(ZERO)
-  private val ValueCb       = Buf.Utf8(VALUE)
-
-  private val STORED        = "STORED"
-  private val NOT_FOUND     = "NOT_FOUND"
-  private val DELETED       = "DELETED"
-  private val ERROR         = "ERROR"
-
-  private val StoredTokens   = Tokens(Seq(Buf.Utf8(STORED)))
-  private val NotFoundTokens = Tokens(Seq(Buf.Utf8(NOT_FOUND)))
-  private val DeletedTokens  = Tokens(Seq(Buf.Utf8(DELETED)))
-  private val ErrorTokens    = Tokens(Seq(Buf.Utf8(ERROR)))
-}
-
-private[kestrel] class ResponseToEncoding extends OneToOneEncoder {
-  import ResponseToEncoding._
-
-  def encode(ctx: ChannelHandlerContext, ch: Channel, message: AnyRef): Decoding = {
-    message match {
-      case Stored()       => StoredTokens
-      case Deleted()      => DeletedTokens
-      case NotFound()     => NotFoundTokens
-      case Error()        => ErrorTokens
-      case Values(values) =>
-        val tokensWithData = values map { case Value(key, value) =>
-          TokensWithData(Seq(ValueCb, key, ZeroCb), value)
-        }
-        ValueLines(tokensWithData)
-    }
-  }
-}
 
 object CommandToEncoding {
   private val ZERO       = Buf.Utf8("0")
@@ -80,7 +43,7 @@ private[finagle] class CommandToEncoding extends AbstractCommandToEncoding[Comma
     }
   }
 
-  def encode(ctx: ChannelHandlerContext, ch: Channel, message: AnyRef): Decoding = {
+  def encode(message: Command): Decoding = {
     message match {
       case Set(key, expiry, value) =>
         TokensWithData(Seq(SET, key, ZERO, Buf.Utf8(expiry.inSeconds.toString)), value)

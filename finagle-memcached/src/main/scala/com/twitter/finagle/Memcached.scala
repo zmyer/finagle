@@ -6,33 +6,30 @@ import com.twitter.conversions.time._
 import com.twitter.finagle
 import com.twitter.finagle.client.{ClientRegistry, DefaultPool, StackClient, StdStackClient, Transporter}
 import com.twitter.finagle.dispatch.{GenSerialClientDispatcher, PipeliningDispatcher, SerialServerDispatcher}
-import com.twitter.finagle.loadbalancer.{Balancers, ConcurrentLoadBalancerFactory, LoadBalancerFactory}
+import com.twitter.finagle.loadbalancer.{Balancers, LoadBalancerFactory}
+import com.twitter.finagle.liveness.{FailureAccrualFactory, FailureAccrualPolicy}
 import com.twitter.finagle.memcached._
-import com.twitter.finagle.memcached.Toggles
 import com.twitter.finagle.memcached.exp.LocalMemcached
-import com.twitter.finagle.memcached.protocol.text.CommandToEncoding
+import com.twitter.finagle.memcached.loadbalancer.ConcurrentLoadBalancerFactory
 import com.twitter.finagle.memcached.protocol.text.client.ClientTransport
-import com.twitter.finagle.memcached.protocol.text.server.ServerTransport
 import com.twitter.finagle.memcached.protocol.text.client.DecodingToResponse
-import com.twitter.finagle.memcached.protocol.text.transport.{Netty3ClientFramer, Netty3ServerFramer, Netty4ClientFramer, Netty4ServerFramer}
+import com.twitter.finagle.memcached.protocol.text.CommandToEncoding
+import com.twitter.finagle.memcached.protocol.text.server.ServerTransport
+import com.twitter.finagle.memcached.protocol.text.transport.{Netty4ClientFramer, Netty4ServerFramer}
 import com.twitter.finagle.memcached.protocol.{Command, Response, RetrievalCommand, Values}
-import com.twitter.finagle.netty3.{Netty3Listener, Netty3Transporter}
 import com.twitter.finagle.netty4.{Netty4Listener, Netty4Transporter}
 import com.twitter.finagle.param.{ExceptionStatsHandler => _, Monitor => _, ResponseClassifier => _, Tracer => _, _}
 import com.twitter.finagle.pool.SingletonPool
 import com.twitter.finagle.server.{Listener, StackServer, StdStackServer}
 import com.twitter.finagle.service._
-import com.twitter.finagle.service.exp.FailureAccrualPolicy
 import com.twitter.finagle.stats.{ExceptionStatsHandler, StatsReceiver}
-import com.twitter.finagle.server.ServerInfo
-import com.twitter.finagle.toggle.Toggle
 import com.twitter.finagle.tracing._
 import com.twitter.finagle.transport.Transport
 import com.twitter.finagle.util.DefaultTimer
 import com.twitter.hashing
 import com.twitter.io.Buf
-import com.twitter.util.{Closable, Duration, Monitor}
 import com.twitter.util.registry.GlobalRegistry
+import com.twitter.util.{Closable, Duration, Monitor}
 import scala.collection.mutable
 
 private[finagle] object MemcachedTracingFilter {
@@ -164,46 +161,6 @@ object Memcached extends finagle.Client[Command, Response]
       implicit val param = Stack.Param(KeyHasher(hashing.KeyHasher.KETAMA))
     }
 
-    /**
-     * Configure the [[Transporter]] and [[Listener]] implementation
-     * used by Memcached.
-     */
-    case class MemcachedImpl(
-        transporter: Stack.Params => Transporter[Buf, Buf],
-        listener: Stack.Params => Listener[Buf, Buf]) {
-      def mk(): (MemcachedImpl, Stack.Param[MemcachedImpl]) =
-        (this, MemcachedImpl.param)
-    }
-
-    object MemcachedImpl {
-      /**
-       * A [[MemcachedImpl]] that uses netty3 as the underlying I/O multiplexer.
-       */
-      val Netty3 = MemcachedImpl(
-        params => Netty3Transporter[Buf, Buf](Netty3ClientFramer, params),
-        params => Netty3Listener[Buf, Buf](Netty3ServerFramer, params))
-
-      /**
-       * A [[MemcachedImpl]] that uses netty4 as the underlying I/O multiplexer.
-       *
-       * @note Important! This is experimental and not yet tested in production!
-       */
-      val Netty4 = MemcachedImpl(
-        params => Netty4Transporter[Buf, Buf](Netty4ClientFramer, params),
-        params => Netty4Listener[Buf, Buf](Netty4ServerFramer, params))
-
-      private[this] val UseNetty4ToggleId: String =
-        "com.twitter.finagle.memcached.UseNetty4"
-
-      private[this] val netty4Toggle: Toggle[Int] = Toggles(UseNetty4ToggleId)
-      private[this] def useNetty4: Boolean = netty4Toggle(ServerInfo().id.hashCode)
-
-      implicit val param: Stack.Param[MemcachedImpl] = Stack.Param(
-        if (useNetty4) Netty4
-        else Netty3
-      )
-    }
-
     case class NumReps(reps: Int) {
       def mk(): (NumReps, Stack.Param[NumReps]) =
         (this, NumReps.param)
@@ -288,7 +245,6 @@ object Memcached extends finagle.Client[Command, Response]
       stack: Stack[ServiceFactory[Command, Response]] = Client.newStack,
       params: Stack.Params = Client.defaultParams)
     extends StdStackClient[Command, Response, Client]
-    with WithConcurrentLoadBalancer[Client]
     with MemcachedRichClient {
 
     import Client.mkDestination
@@ -301,8 +257,8 @@ object Memcached extends finagle.Client[Command, Response]
     protected type In = Buf
     protected type Out = Buf
 
-    protected def newTransporter(): Transporter[In, Out] =
-      params[param.MemcachedImpl].transporter(params)
+    protected def newTransporter(addr: SocketAddress): Transporter[In, Out] =
+      Netty4Transporter.raw(Netty4ClientFramer, addr, params)
 
     protected def newDispatcher(transport: Transport[In, Out]): Service[Command, Response] =
       new PipeliningDispatcher(
@@ -376,10 +332,17 @@ object Memcached extends finagle.Client[Command, Response]
     def withNumReps(reps: Int): Client =
       configured(param.NumReps(reps))
 
-    // Java-friendly forwarders
-    // See https://issues.scala-lang.org/browse/SI-8905
-    override val withLoadBalancer: ConcurrentLoadBalancingParams[Client] =
-      new ConcurrentLoadBalancingParams(this)
+    /**
+     * Configures the number of concurrent `connections` a single endpoint has.
+     * The connections are load balanced over which allows the pipelined client to
+     * avoid head-of-line blocking and reduce its latency.
+     *
+     * We've empirically found that four is a good default for this, but it can be
+     * increased at the cost of additional connection overhead.
+     */
+    def connectionsPerEndpoint(connections: Int): Client =
+      configured(ConcurrentLoadBalancerFactory.Param(connections))
+
     override val withTransport: ClientTransportParams[Client] =
       new ClientTransportParams(this)
     override val withSession: ClientSessionParams[Client] =
@@ -440,7 +403,7 @@ object Memcached extends finagle.Client[Command, Response]
     protected type Out = Buf
 
     protected def newListener(): Listener[In, Out] =
-      params[param.MemcachedImpl].listener(params)
+      Netty4Listener[Buf, Buf](Netty4ServerFramer, params)
 
     protected def newDispatcher(
       transport: Transport[In, Out],

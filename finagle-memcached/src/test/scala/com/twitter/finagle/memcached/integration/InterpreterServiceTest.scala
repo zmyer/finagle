@@ -6,16 +6,12 @@ import com.twitter.finagle.Name
 import com.twitter.finagle.Service
 import com.twitter.finagle.memcached.Interpreter
 import com.twitter.finagle.memcached.protocol._
-import com.twitter.finagle.memcached.util.ChannelBufferUtils._
 import com.twitter.io.Buf
 import com.twitter.util.TimeConversions._
 import com.twitter.util.{Await, Time}
 import java.net.{InetAddress, InetSocketAddress}
-import org.junit.runner.RunWith
-import org.scalatest.junit.JUnitRunner
 import org.scalatest.{BeforeAndAfter, FunSuite}
 
-@RunWith(classOf[JUnitRunner])
 class InterpreterServiceTest extends FunSuite with BeforeAndAfter {
 
   var server: InProcessMemcached = null
@@ -25,7 +21,7 @@ class InterpreterServiceTest extends FunSuite with BeforeAndAfter {
     server = new InProcessMemcached(new InetSocketAddress(InetAddress.getLoopbackAddress, 0))
     val address = Address(server.start().boundAddress.asInstanceOf[InetSocketAddress])
     client = Memcached.client
-      .withLoadBalancer.connectionsPerEndpoint(1)
+      .connectionsPerEndpoint(1)
       .newService(Name.bound(address), "memcache")
   }
 

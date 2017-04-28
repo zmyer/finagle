@@ -8,13 +8,15 @@ import com.twitter.finagle.client.{StackBasedClient, Transporter}
 import com.twitter.finagle.factory.{BindingFactory, TimeoutFactory}
 import com.twitter.finagle.filter.ExceptionSourceFilter
 import com.twitter.finagle.loadbalancer.LoadBalancerFactory
+import com.twitter.finagle.liveness.FailureAccrualFactory
 import com.twitter.finagle.netty3.Netty3Transporter
 import com.twitter.finagle.service.FailFastFactory.FailFast
 import com.twitter.finagle.service._
-import com.twitter.finagle.ssl.Ssl
+import com.twitter.finagle.ssl.TrustCredentials
+import com.twitter.finagle.ssl.client.{SslClientConfiguration, SslClientEngineFactory, SslContextClientEngineFactory}
 import com.twitter.finagle.stats.{NullStatsReceiver, StatsReceiver}
 import com.twitter.finagle.tracing.{NullTracer, TraceInitializerFilter}
-import com.twitter.finagle.transport.{TlsConfig, Transport}
+import com.twitter.finagle.transport.Transport
 import com.twitter.finagle.util._
 import com.twitter.util
 import com.twitter.util.{Duration, Future, NullMonitor, Time, Try}
@@ -109,20 +111,12 @@ object ClientConfig {
   def nilClient[Req, Rep]: StackBasedClient[Req, Rep] = NilClient[Req, Rep]()
 
   // params specific to ClientBuilder
-  private[builder] case class DestName(name: Name) {
+  private[finagle] case class DestName(name: Name) {
     def mk(): (DestName, Stack.Param[DestName]) =
       (this, DestName.param)
   }
-  private[builder] object DestName {
+  private[finagle] object DestName {
     implicit val param = Stack.Param(DestName(Name.empty))
-  }
-
-  private[builder] case class GlobalTimeout(timeout: Duration) {
-    def mk(): (GlobalTimeout, Stack.Param[GlobalTimeout]) =
-      (this, GlobalTimeout.param)
-  }
-  private[builder] object GlobalTimeout {
-    implicit val param = Stack.Param(GlobalTimeout(Duration.Top))
   }
 
   private[builder] case class Daemonize(onOrOff: Boolean) {
@@ -173,7 +167,7 @@ private[builder] final class ClientConfig[Req, Rep, HasCluster, HasCodec, HasHos
  * A builder of Finagle [[com.twitter.finagle.Client Clients]].
  *
  * Please see the
- * [[http://twitter.github.io/finagle/guide/Configuration.html Finagle user guide]]
+ * [[https://twitter.github.io/finagle/guide/Configuration.html Finagle user guide]]
  * for information on the preferred `with`-style client-construction APIs.
  *
  * {{{
@@ -246,11 +240,11 @@ private[builder] final class ClientConfig[Req, Rep, HasCluster, HasCodec, HasHos
  *  - `hostConnectionMaxIdleTime`: [[com.twitter.util.Duration.Top Duration.Top]]
  *  - `hostConnectionMaxLifeTime`: [[com.twitter.util.Duration.Top Duration.Top]]
  *
- * @see The [[http://twitter.github.io/finagle/guide/Configuration.html user guide]]
+ * @see The [[https://twitter.github.io/finagle/guide/Configuration.html user guide]]
  *      for information on the preferred `with`-style APIs insead.
  */
 class ClientBuilder[Req, Rep, HasCluster, HasCodec, HasHostConnectionLimit] private[finagle](
-    client: StackBasedClient[Req, Rep]) {
+    private[finagle] val client: StackBasedClient[Req, Rep]) {
   import ClientConfig._
   import com.twitter.finagle.param._
 
@@ -298,10 +292,6 @@ class ClientBuilder[Req, Rep, HasCluster, HasCodec, HasHostConnectionLimit] priv
    * The underlying [[Stack.Param Params]] used for configuration.
    */
   def params: Stack.Params = client.params
-
-  // Used in deprecated KetamaClientBuilder, remove when we drop it in
-  // favor of the finagle.Memcached protocol object.
-  private[finagle] def underlying: StackBasedClient[Req, Rep] = client
 
   /**
    * Specify the set of hosts to connect this client to.  Requests
@@ -464,11 +454,13 @@ class ClientBuilder[Req, Rep, HasCluster, HasCodec, HasHostConnectionLimit] priv
    * mechanism for specifying a set of endpoints to which this client
    * remains connected.
    */
+  @deprecated("Use ClientBuilder.dest with a com.twitter.finagle.Name", "2017-04-18")
   def cluster(
     cluster: Cluster[SocketAddress]
   ): ClientBuilder[Req, Rep, Yes, HasCodec, HasHostConnectionLimit] =
     group(Group.fromCluster(cluster))
 
+  @deprecated("Use ClientBuilder.dest with a com.twitter.finagle.Name", "2017-04-18")
   def group(
     group: Group[SocketAddress]
   ): ClientBuilder[Req, Rep, Yes, HasCodec, HasHostConnectionLimit] =
@@ -653,7 +645,7 @@ class ClientBuilder[Req, Rep, HasCluster, HasCodec, HasHostConnectionLimit] priv
    * @see [[requestTimeout(Duration)]]
    */
   def timeout(duration: Duration): This =
-    configured(GlobalTimeout(duration))
+    configured(TimeoutFilter.TotalTimeout(duration))
 
   /**
    * Apply TCP keepAlive (`SO_KEEPALIVE` socket option).
@@ -922,7 +914,36 @@ class ClientBuilder[Req, Rep, HasCluster, HasCodec, HasHostConnectionLimit] priv
     configured(Retries.Budget(budget, backoffSchedule))
 
   /**
-   * Encrypt the connection with SSL.  Hostname verification will be
+   * Encrypt the connection with SSL.
+   *
+   * To migrate to the Stack-based APIs, use `ClientTransportParams.tls`.
+   * For example:
+   * {{{
+   * import com.twitter.finagle.Http
+   *
+   * Http.client.withTransport.tls(config)
+   * }}}
+   */
+  def tls(config: SslClientConfiguration): This =
+    configured(Transport.ClientSsl(Some(config)))
+
+  /**
+   * Encrypt the connection with SSL/TLS.
+   *
+   * To migrate to the Stack-based APIs, use `ClientTransportParams.tls`.
+   * For example:
+   * {{{
+   * import com.twitter.finagle.Http
+   *
+   * Http.client.withTransport.tls(config, engineFactory)
+   * }}}
+   */
+  def tls(config: SslClientConfiguration, engineFactory: SslClientEngineFactory): This =
+    configured(Transport.ClientSsl(Some(config)))
+    .configured(SslClientEngineFactory.Param(engineFactory))
+
+  /**
+   * Encrypt the connection with SSL/TLS.  Hostname verification will be
    * provided against the given hostname.
    *
    * To migrate to the Stack-based APIs, use `ClientTransportParams.tls`.
@@ -934,17 +955,11 @@ class ClientBuilder[Req, Rep, HasCluster, HasCodec, HasHostConnectionLimit] priv
    * }}}
    */
   def tls(hostname: String): This =
-    configured(Transport.TLSClientEngine(Some {
-      case inet: InetSocketAddress => Ssl.client(hostname, inet.getPort)
-      case _ => Ssl.client()
-    }))
-    .configured(Transporter.TLSHostname(Some(hostname)))
-    .configured(Transport.Tls(TlsConfig.ClientHostname(hostname)))
+    tls(SslClientConfiguration(hostname = Some(hostname)))
 
   /**
-   * Encrypt the connection with SSL.  The Engine to use can be passed into the client.
-   * This allows the user to use client certificates
-   * No SSL Hostname Validation is performed
+   * Encrypt the connection with SSL/TLS.  The Engine to use can be passed into the client.
+   * No SSL/TLS Hostname Validation is performed
    *
    * To migrate to the Stack-based APIs, use `ClientTransportParams.tls`.
    * For example:
@@ -955,28 +970,15 @@ class ClientBuilder[Req, Rep, HasCluster, HasCodec, HasHostConnectionLimit] priv
    * }}}
    */
   def tls(sslContext: SSLContext): This =
-    configured(Transport.TLSClientEngine(Some {
-      case inet: InetSocketAddress => Ssl.client(sslContext, inet.getHostName, inet.getPort)
-      case _ => Ssl.client(sslContext)
-    }))
-    .configured(Transport.Tls(TlsConfig.ClientSslContext(sslContext)))
+    tls(SslClientConfiguration(), new SslContextClientEngineFactory(sslContext))
 
   /**
-   * Encrypt the connection with SSL.  The Engine to use can be passed into the client.
-   * This allows the user to use client certificates
-   * SSL Hostname Validation is performed, on the passed in hostname
+   * Encrypt the connection with SSL/TLS.  The Engine to use can be passed into the client.
+   * SSL/TLS Hostname Validation is performed, on the passed in hostname
    */
   def tls(sslContext: SSLContext, hostname: Option[String]): This =
-    configured(Transport.TLSClientEngine(Some {
-      case inet: InetSocketAddress => Ssl.client(sslContext, hostname.getOrElse(inet.getHostName), inet.getPort)
-      case _ => Ssl.client(sslContext)
-    }))
-    .configured(Transporter.TLSHostname(hostname))
-    .configured(Transport.Tls(
-      hostname.fold[TlsConfig](TlsConfig.ClientSslContext(sslContext)) { hn =>
-        TlsConfig.ClientSslContextAndHostname(sslContext, hn)
-      }
-    ))
+    tls(SslClientConfiguration(hostname = hostname),
+      new SslContextClientEngineFactory(sslContext))
 
   /**
    * Do not perform TLS validation. Probably dangerous.
@@ -990,12 +992,7 @@ class ClientBuilder[Req, Rep, HasCluster, HasCodec, HasHostConnectionLimit] priv
    * }}}
    */
   def tlsWithoutValidation(): This =
-    configured(Transport.TLSClientEngine(Some({
-      case inet: InetSocketAddress => Ssl.clientWithoutCertificateValidation(inet.getHostName, inet.getPort)
-      case _ => Ssl.clientWithoutCertificateValidation()
-    })))
-    .configured(Transport.Tls(TlsConfig.ClientNoValidation))
-
+    tls(SslClientConfiguration(trustCredentials = TrustCredentials.Insecure))
 
   /**
    * Make connections via the given HTTP proxy.
@@ -1003,15 +1000,6 @@ class ClientBuilder[Req, Rep, HasCluster, HasCodec, HasHostConnectionLimit] priv
    */
   def httpProxy(httpProxy: SocketAddress): This =
     configured(params[Transporter.HttpProxy].copy(sa = Some(httpProxy)))
-
-  /**
-    * Make connections via the given HTTP proxy by host name and port.
-    * The host name is resolved every transport connection.
-    * This API is experiment.
-    * If this is defined concurrently with socksProxy, the order in which they are applied is undefined.
-    */
-  def expHttpProxy(hostName: String, port: Int): This =
-    configured(params[Transporter.HttpProxy].copy(sa = Some(InetSocketAddress.createUnresolved(hostName, port))))
 
   /**
    * For the http proxy use these [[Credentials]] for authentication.
@@ -1033,17 +1021,6 @@ class ClientBuilder[Req, Rep, HasCluster, HasCodec, HasHostConnectionLimit] priv
    */
   def socksProxy(socksProxy: Option[SocketAddress]): This =
     configured(params[Transporter.SocksProxy].copy(sa = socksProxy))
-
-  /**
-    * Make connections via the given HTTP proxy by host name and port.
-    * The host name is resolved every transport connection.
-    * This API is experiment.
-    * If this is defined concurrently with httpProxy, the order in which they are applied is undefined.
-    */
-  def expSocksProxy(hostName: String, port: Int): This =
-    configured(
-      params[Transporter.SocksProxy].copy(sa = Some(InetSocketAddress.createUnresolved(hostName, port)))
-    )
 
   /**
    * For the socks proxy use this username for authentication.
@@ -1315,26 +1292,23 @@ private[finagle] object ClientBuilderClient {
   }
 
   private[builder] class GlobalTimeoutModule[Req, Rep]
-    extends Stack.Module2[GlobalTimeout, Timer, ServiceFactory[Req, Rep]] {
+    extends Stack.Module2[TimeoutFilter.TotalTimeout, Timer, ServiceFactory[Req, Rep]] {
     /** See [[TimeoutFilter.totalTimeoutRole]]. */
     val role: Stack.Role = Stack.Role("ClientBuilder GlobalTimeoutFilter")
     val description: String = "Application-configured global timeout"
 
     def make(
-      globalTimeoutP: GlobalTimeout,
-      timerP: Timer,
+      totalTimeout: TimeoutFilter.TotalTimeout,
+      timerParam: Timer,
       next: ServiceFactory[Req, Rep]
-    ): ServiceFactory[Req, Rep] = {
-      val timeout = globalTimeoutP.timeout
-      if (!timeout.isFinite || timeout <= Duration.Zero) next
-      else {
-        val filter = new TimeoutFilter[Req, Rep](
-          () => timeout,
-          timeout => new GlobalRequestTimeoutException(timeout),
-          timerP.timer)
-        filter.andThen(next)
-      }
-    }
+    ): ServiceFactory[Req, Rep] =
+      TimeoutFilter.make(
+        totalTimeout.tunableTimeout,
+        TimeoutFilter.TotalTimeout.Default,
+        Duration.Zero,
+        timeout => new GlobalRequestTimeoutException(timeout),
+        timerParam.timer,
+        next)
   }
 
   private[builder] class ExceptionSourceFilterModule[Req, Rep]
@@ -1479,10 +1453,10 @@ private case class CodecClient[Req, Rep](
       protected type In = Any
       protected type Out = Any
 
-      protected def newTransporter(): Transporter[Any, Any] = {
+      protected def newTransporter(addr: SocketAddress): Transporter[Any, Any] = {
         val Stats(stats) = params[Stats]
         val newTransport = (ch: Channel) => codec.newClientTransport(ch, stats)
-        Netty3Transporter[Any, Any](codec.pipelineFactory,
+        Netty3Transporter[Any, Any](codec.pipelineFactory, addr,
           params + Netty3Transporter.TransportFactory(newTransport))
       }
 

@@ -4,6 +4,7 @@ import com.twitter.concurrent.AsyncQueue
 import com.twitter.conversions.time._
 import com.twitter.finagle.{Service, Status}
 import com.twitter.finagle.http
+import com.twitter.finagle.http.exp.StreamTransport
 import com.twitter.finagle.http.{Fields, Request, Response, Version}
 import com.twitter.finagle.http.netty.Netty3ServerStreamTransport
 import com.twitter.finagle.netty3.ChannelBufferBuf
@@ -51,7 +52,7 @@ class HttpServerDispatcherTest extends FunSuite {
     val (in, out) = mkPair[Any, Any]
     val disp = new HttpServerDispatcher(out, service, NullStatsReceiver)
 
-    in.write(Request("/foo").httpMessage)
+    in.write(Request("/foo").httpRequest)
     Await.result(in.read, 5.seconds) match {
       case resp: HttpResponse =>
         assert(resp.getStatus == HttpResponseStatus.OK)
@@ -110,7 +111,7 @@ class HttpServerDispatcherTest extends FunSuite {
 }
 
 object HttpServerDispatcherTest {
-  def mkPair[A,B] = {
+  def mkPair[A: Manifest, B: Manifest]: (Transport[A, B], StreamTransport[Response, Request]) = {
     val inQ = new AsyncQueue[Any]
     val outQ = new AsyncQueue[Any]
     (

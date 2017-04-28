@@ -15,10 +15,10 @@ import com.twitter.finagle.service.PendingRequestFilter
 import com.twitter.finagle.stats.InMemoryStatsReceiver
 import com.twitter.finagle.transport.Transport
 import com.twitter.finagle.util.StackRegistry
-import com.twitter.finagle.{param, Name}
+import com.twitter.finagle.{Name, param}
 import com.twitter.util._
-import com.twitter.util.registry.{GlobalRegistry, SimpleRegistry, Entry}
-import java.net.{InetAddress, InetSocketAddress}
+import com.twitter.util.registry.{Entry, GlobalRegistry, SimpleRegistry}
+import java.net.{InetAddress, InetSocketAddress, SocketAddress}
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicInteger
 import org.junit.runner.RunWith
@@ -41,8 +41,8 @@ private object StackClientTest {
     protected type In = String
     protected type Out = String
 
-    protected def newTransporter(): Transporter[String, String] =
-      Netty3Transporter(StringClientPipeline, params)
+    protected def newTransporter(addr: SocketAddress): Transporter[String, String] =
+      Netty3Transporter(StringClientPipeline, addr, params)
 
     protected def newDispatcher(
       transport: Transport[In, Out]
@@ -470,7 +470,6 @@ class StackClientTest extends FunSuite
     val svc = stringClient.filtered(reverseFilter).newRichClient(name, "test_client")
     assert(Await.result(svc.ping(), 1.second) == "ping".reverse)
   }
-
 
   test("endpointer clears Contexts") {
     import StackClientTest._

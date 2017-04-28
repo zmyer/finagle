@@ -20,10 +20,42 @@ class ChannelBufferBuf(protected val underlying: ChannelBuffer) extends Buf {
 
   override def toString: String = s"ChannelBufferBuf($underlying)"
 
+  def get(index: Int): Byte = {
+    val pos = underlying.readerIndex + index
+    underlying.getByte(pos)
+  }
+
+  def process(from: Int, until: Int, processor: Buf.Processor): Int = {
+    checkSliceArgs(from, until)
+    if (isSliceEmpty(from, until)) return -1
+    val off = underlying.readerIndex + from
+    val endAt = math.min(length, underlying.readerIndex + until)
+    var i = 0
+    var continue = true
+    while (continue && i < endAt) {
+      val byte = underlying.getByte(off + i)
+      if (processor(byte))
+        i += 1
+      else
+        continue = false
+    }
+    if (continue) -1
+    else from + i
+  }
+
   def write(bytes: Array[Byte], off: Int): Unit = {
     checkWriteArgs(bytes.length, off)
     val dup = underlying.duplicate()
     dup.readBytes(bytes, off, dup.readableBytes)
+  }
+
+  def write(buffer: java.nio.ByteBuffer): Unit = {
+    checkWriteArgs(buffer.remaining, 0)
+    val dup = underlying.duplicate()
+    val currentLimit = buffer.limit
+    buffer.limit(buffer.position + length)
+    dup.readBytes(buffer)
+    buffer.limit(currentLimit)
   }
 
   def slice(i: Int, j: Int): Buf = {

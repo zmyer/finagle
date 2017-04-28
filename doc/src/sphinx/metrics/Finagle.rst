@@ -47,7 +47,7 @@ ClientRegistry
 
 **finagle/clientregistry/size**
   A gauge of the current number of clients registered in the
-  :src:`HashedWheelTimer.Default <com/twitter/finagle/client/ClientRegistry.scala>`.
+  :src:`ClientRegistry <com/twitter/finagle/client/ClientRegistry.scala>`.
 
 Name Resolution
 <<<<<<<<<<<<<<<
@@ -131,3 +131,7 @@ NOTE: All pooling metrics are only exported when pooling is enabled
 **pooling/deallocations/tiny**
   A gauge (a counter) of total number of TINY *direct deallocations*
   (i.e., less than 512 bytes).
+
+**reference_leaks**
+  A counter of detected reference leaks. See longer note on 
+  `com.twitter.finagle.netty4.trackReferenceLeaks` for details.

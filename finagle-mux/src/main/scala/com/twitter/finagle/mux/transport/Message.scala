@@ -1,9 +1,9 @@
 package com.twitter.finagle.mux.transport
 
-import com.twitter.finagle.tracing.{SpanId, TraceId, Flags}
-import com.twitter.finagle.util.{BufReader, BufWriter}
+import com.twitter.finagle.netty4.Bufs
+import com.twitter.finagle.tracing.{Flags, SpanId, TraceId}
 import com.twitter.finagle.{Dentry, Dtab, Failure, NameTree, Path}
-import com.twitter.io.Buf
+import com.twitter.io.{Buf, ByteReader, ByteWriter}
 import com.twitter.util.{Duration, Time}
 import java.nio.charset.{StandardCharsets => Charsets}
 import scala.collection.mutable.ArrayBuffer
@@ -34,7 +34,16 @@ private[twitter] sealed trait Message {
 }
 
 private[twitter] object Message {
+
+
   object Types {
+
+    private[mux] def isRefCounted(typ: Byte): Boolean =
+      (typ == Types.Tping || typ == Types.Rping
+        || typ == Types.Tdiscarded || typ == Types.Rdiscarded
+        || typ == Types.Tdrain || typ == Types.Rdrain
+        || typ == Types.Tlease)
+
     // Application messages:
     val Treq = 1: Byte
     val Rreq = -1: Byte
@@ -79,7 +88,7 @@ private[twitter] object Message {
     def setMsb(tag: Int): Int = tag | TagMSB
   }
 
-  private object ReplyStatus {
+  private[mux] object ReplyStatus {
     val Ok: Byte = 0
     val Error: Byte = 1
     val Nack: Byte = 2
@@ -109,7 +118,7 @@ private[twitter] object Message {
         // 8 bytes for length encoding of k, v
         size += 8 + k.length + v.length
       }
-      val bw = BufWriter.fixed(size)
+      val bw = ByteWriter.fixed(size)
       bw.writeShortBE(version)
       iter = headers.iterator
       while (iter.hasNext) {
@@ -123,8 +132,7 @@ private[twitter] object Message {
       bw.owned()
     }
 
-    def decode(buf: Buf): (Short, Seq[(Buf, Buf)]) = {
-      val br = BufReader(buf)
+    def decode(br: ByteReader): (Short, Seq[(Buf, Buf)]) = {
       val version = br.readShortBE()
       val headers = new ArrayBuffer[(Buf, Buf)]
       while (br.remaining > 0) {
@@ -168,7 +176,7 @@ private[twitter] object Message {
         // Currently we require the 3-tuple, but this is not
         // necessarily required.
         case Some(traceId) =>
-          val hd = BufWriter.fixed(1+1+1+24+1+1+1)
+          val hd = ByteWriter.fixed(1+1+1+24+1+1+1)
           hd.writeByte(2) // 2 entries
 
           hd.writeByte(Keys.TraceId) // key 0 (traceid)
@@ -255,7 +263,7 @@ private[twitter] object Message {
       }
 
       // then, allocate and populate the header
-      val hd = BufWriter.fixed(n)
+      val hd = ByteWriter.fixed(n)
       hd.writeShortBE(contexts.length)
       iter = contexts.iterator
       while (iter.hasNext) {
@@ -304,7 +312,7 @@ private[twitter] object Message {
         }
       }
 
-      val hd = BufWriter.fixed(n)
+      val hd = ByteWriter.fixed(n)
       hd.writeByte(status)
       hd.writeShortBE(contexts.length)
       iter = contexts.iterator
@@ -417,7 +425,7 @@ private[twitter] object Message {
   case class Tlease(unit: Byte, howLong: Long) extends MarkerMessage {
     def typ = Types.Tlease
     lazy val buf: Buf = {
-      val bw = BufWriter.fixed(9)
+      val bw = ByteWriter.fixed(9)
       bw.writeByte(unit)
       bw.writeLongBE(howLong)
       bw.owned()
@@ -452,11 +460,10 @@ private[twitter] object Message {
 
   def encodeString(str: String): Buf = Buf.Utf8(str)
 
-  private def decodeTreq(tag: Int, buf: Buf) = {
-    if (buf.length < 1)
+  private def decodeTreq(tag: Int, br: ByteReader):Treq = {
+    if (br.remaining < 1)
       throwBadMessageException("short Treq")
 
-    val br = BufReader(buf)
     var nkeys = br.readByte().toInt
     if (nkeys < 0)
       throwBadMessageException("Treq: too many keys")
@@ -514,7 +521,7 @@ private[twitter] object Message {
     Treq(tag, id, br.readAll())
   }
 
-  private def decodeContexts(br: BufReader): Seq[(Buf, Buf)] = {
+  private def decodeContexts(br: ByteReader): Seq[(Buf, Buf)] = {
     val n = br.readShortBE()
     if (n == 0)
       return Nil
@@ -524,14 +531,20 @@ private[twitter] object Message {
     while (i < n) {
       val k = br.readBytes(br.readShortBE())
       val v = br.readBytes(br.readShortBE())
-      contexts(i) = (k, v)
+
+      // For the context keys and values we want to decouple the backing array from the rest of
+      // the Buf that composed the message. The body of the message is typically on the order of a
+      // number of kilobytes and can be much larger, while the context entries are typically
+      // on the order of < 100 bytes. Therefore, it is beneficial to decouple the lifetimes
+      // at the cost of copying the context entries, but this ends up being a net win for the GC.
+      // More context can be found in ``RB_ID=559066``.
+      contexts(i) = (coerceTrimmed(k), coerceTrimmed(v))
       i += 1
     }
     contexts
   }
 
-  private def decodeTdispatch(tag: Int, buf: Buf) = {
-    val br = BufReader(buf)
+  private def decodeTdispatch(tag: Int, br: ByteReader) = {
     val contexts = decodeContexts(br)
     val ndst = br.readShortBE()
     // Path.read("") fails, so special case empty-dst.
@@ -555,8 +568,7 @@ private[twitter] object Message {
     Tdispatch(tag, contexts, dst, dtab, br.readAll())
   }
 
-  private def decodeRdispatch(tag: Int, buf: Buf) = {
-    val br = BufReader(buf)
+  private def decodeRdispatch(tag: Int, br: ByteReader) = {
     val status = br.readByte()
     val contexts = decodeContexts(br)
     val rest = br.readAll()
@@ -568,10 +580,9 @@ private[twitter] object Message {
     }
   }
 
-  private def decodeRreq(tag: Int, buf: Buf) = {
-    if (buf.length < 1)
-      throwBadMessageException("short Rreq")
-    val br = BufReader(buf)
+  private def decodeRreq(tag: Int, br: ByteReader) = {
+    if (br.remaining < 1)
+    throwBadMessageException("short Rreq")
     val status = br.readByte()
     val rest = br.readAll()
     status match {
@@ -582,55 +593,68 @@ private[twitter] object Message {
     }
   }
 
-  private def decodeTdiscarded(buf: Buf) = {
-    if (buf.length < 3)
+  private def decodeTdiscarded(br: ByteReader) = {
+    if (br.remaining < 3)
       throwBadMessageException("short Tdiscarded message")
-    val br = BufReader(buf)
     val which = ((br.readByte() & 0xff) << 16) |
       ((br.readByte() & 0xff) << 8) |
       (br.readByte() & 0xff)
     Tdiscarded(which, decodeUtf8(br.readAll()))
   }
 
-  private def decodeTlease(buf: Buf) = {
-    if (buf.length < 9)
+  private def decodeTlease(br: ByteReader) = {
+    if (br.remaining < 9)
       throwBadMessageException("short Tlease message")
-    val br = BufReader(buf)
     val unit: Byte = br.readByte()
     val howMuch: Long = br.readLongBE()
     Tlease(unit, howMuch)
   }
 
+
+  /**
+   * Try to decode a `buf` to [[Message]]. If [[Buf]] is backed
+   * by a direct buffer then that buffer will be released after decode.
+   *
+   * @note may throw a [[Failure]] wrapped [[BadMessageException]]
+   */
   def decode(buf: Buf): Message = {
-    if (buf.length < 4)
-      throwBadMessageException("short message")
-    val br = BufReader(buf)
-    val head = br.readIntBE()
-    val rest = br.readAll()
+    try decode(ByteReader(buf))
+    finally Bufs.releaseDirect(buf)
+  }
+
+  /**
+   * Try to decode the contents of a `ByteReader` to [[Message]]. This function
+   * assumes the content of the `ByteReader` represents exactly one message.
+   *
+   * @note may throw a [[Failure]] wrapped [[BadMessageException]]
+   */
+  def decode(byteReader: ByteReader): Message = {
+    if (byteReader.remaining < 4) throwBadMessageException(s"short message: ${Buf.slowHexString(byteReader.readAll())}")
+    val head = byteReader.readIntBE()
     val typ = Tags.extractType(head)
     val tag = Tags.extractTag(head)
-    if (Tags.isFragment(tag))
-      Fragment(typ, tag, rest)
+
+    if (Tags.isFragment(tag)) Fragment(typ, tag, byteReader.readAll())
     else typ match {
       case Types.Tinit =>
-        val (version, ctx) = Init.decode(rest)
+        val (version, ctx) = Init.decode(byteReader)
         Tinit(tag, version, ctx)
       case Types.Rinit =>
-        val (version, ctx) = Init.decode(rest)
+        val (version, ctx) = Init.decode(byteReader)
         Rinit(tag, version, ctx)
-      case Types.Treq => decodeTreq(tag, rest)
-      case Types.Rreq => decodeRreq(tag, rest)
-      case Types.Tdispatch => decodeTdispatch(tag, rest)
-      case Types.Rdispatch => decodeRdispatch(tag, rest)
+      case Types.Treq => decodeTreq(tag, byteReader)
+      case Types.Rreq => decodeRreq(tag, byteReader)
+      case Types.Tdispatch => decodeTdispatch(tag, byteReader)
+      case Types.Rdispatch => decodeRdispatch(tag, byteReader)
       case Types.Tdrain => Tdrain(tag)
       case Types.Rdrain => Rdrain(tag)
       case Types.Tping => Tping(tag)
       case Types.Rping => Rping(tag)
-      case Types.Rerr | Types.BAD_Rerr => Rerr(tag, decodeUtf8(rest))
+      case Types.Rerr | Types.BAD_Rerr => Rerr(tag, decodeUtf8(byteReader.readAll()))
       case Types.Rdiscarded => Rdiscarded(tag)
-      case Types.Tdiscarded | Types.BAD_Tdiscarded => decodeTdiscarded(rest)
-      case Types.Tlease => decodeTlease(rest)
-      case unknown => throwBadMessageException(unknownMessageDescription(unknown, tag, rest))
+      case Types.Tdiscarded | Types.BAD_Tdiscarded => decodeTdiscarded(byteReader)
+      case Types.Tlease => decodeTlease(byteReader)
+      case unknown => throwBadMessageException(unknownMessageDescription(unknown, tag, byteReader))
     }
   }
 
@@ -654,10 +678,34 @@ private[twitter] object Message {
   private def throwBadMessageException(why: String): Nothing =
     throw Failure.wrap(BadMessageException(why))
 
-  private def unknownMessageDescription(tpe: Byte, tag: Int, payload: Buf): String = {
-    val toWrite = payload.slice(0, 16) // Limit reporting to at most 16 bytes
+  private def unknownMessageDescription(tpe: Byte, tag: Int, payload: ByteReader): String = {
+    val remaining = payload.remaining
+    val toWrite = payload.readBytes(16) // Limit reporting to at most 16 bytes
     val bytesStr = Buf.slowHexString(toWrite)
-    s"unknown message type: $tpe [tag=$tag]. Payload bytes: ${payload.length}. " +
+    s"unknown message type: $tpe [tag=$tag]. Payload bytes: $remaining. " +
       s"First ${toWrite.length} bytes of the payload: '$bytesStr'"
+  }
+
+
+
+  /**
+   * Safely coerce the Buf to a representation that doesn't hold a reference to unused data.
+   *
+   * The resulting Buf will be either the Empty Buf if the input Buf has zero content, or a
+   * ByteArray whos underlying array contains only the bytes exposed by the Buf, making a
+   * copy of the data if necessary.
+   *
+   * For example, calling `coerceTrimmed` on a Buf that is a 10 byte slice of a larger Buf
+   * which contains 1 KB of data will yield a new ByteArray backed by a new Array[Byte]
+   * containing only the 10 bytes exposed by the passed slice.
+   *
+   * @note exposed for testing.
+   */
+  private[transport] def coerceTrimmed(buf: Buf): Buf = buf match {
+    case buf if buf.isEmpty => Buf.Empty
+    case Buf.ByteArray.Owned(bytes, begin, end) if begin == 0 && end == bytes.length => buf
+    case buf =>
+      val bytes = Buf.ByteArray.Owned.extract(buf)
+      Buf.ByteArray.Owned(bytes)
   }
 }

@@ -93,7 +93,31 @@ final class Failure private[finagle](
 
 object Failure {
   object Source extends Enumeration {
-    val Service, Role, RemoteInfo = Value
+    val
+      /**
+       * Represents the name of the service.
+       * See [[com.twitter.finagle.filter.ExceptionSourceFilter]]
+       */
+      Service,
+
+      /**
+       * Represents a [[Stack.Role Stack module's role]].
+       */
+      Role,
+
+      /**
+       * Represents the remote info of the upstream caller and/or
+       * downstream backend.
+       * See [[com.twitter.finagle.service.ExceptionRemoteInfoFactory]]
+       */
+      RemoteInfo,
+
+      /**
+       * Represents the name of the method.
+       * See [[com.twitter.finagle.client.MethodBuilder]].
+       */
+      Method
+    = Value
   }
 
   /**
@@ -127,6 +151,22 @@ object Failure {
    * chain as far as possible.
    */
   val NonRetryable: Long = FailureFlags.NonRetryable
+
+  /**
+   * Representation of a nack response that is retryable
+   */
+  val RetryableNackFailure: Failure = Failure.rejected("The request was Nacked by the server")
+
+  /**
+   * Representation of a future nack response that is retryable
+   */
+  val FutureRetryableNackFailure: Future[Nothing] = Future.exception(RetryableNackFailure)
+
+  /**
+   * Representation of a nack response that is non-retryable
+   */
+  val NonRetryableNackFailure: Failure =
+    Failure("The request was Nacked by the server and should not be retried", Failure.Rejected|Failure.NonRetryable)
 
   /**
    * Flag naming indicates a naming failure. This is Finagle-internal.

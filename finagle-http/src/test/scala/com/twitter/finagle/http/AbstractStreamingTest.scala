@@ -64,7 +64,10 @@ abstract class AbstractStreamingTest extends FunSuite {
     shouldFail = false
     val req2 = get("abc")
     val res2 = client(req2)
-    assert(!res2.isDefined)
+
+    // This is flaky. The assertion has been moved to the tests which use res2, and those have been
+    // marked as flaky.
+    //assert(!res2.isDefined)
 
     // Assert previously queued request is now processed, and not interrupted
     // midstream.
@@ -92,7 +95,9 @@ abstract class AbstractStreamingTest extends FunSuite {
     assertSecondRequestOk()
   })
 
+  if (!sys.props.contains("SKIP_FLAKY"))
   test("client: response stream fails on read") (new ClientCtx {
+    assert(!res2.isDefined)
     // Reader should be suspended in a reading state.
     val f = res.reader.read(1)
     assert(!f.isDefined)
@@ -142,16 +147,20 @@ abstract class AbstractStreamingTest extends FunSuite {
     await(closable.close())
   }
 
+  if (!sys.props.contains("SKIP_FLAKY"))
   test("client: fail request writer") (new ClientCtx {
+    assert(!res2.isDefined)
     val exc = new Exception
     req.writer.fail(exc)
-    assert(!res2.isDefined)
+
     res.reader.discard()
 
     assertSecondRequestOk()
   })
 
+  if (!sys.props.contains("SKIP_FLAKY"))
   test("client: discard respond reader") (new ClientCtx {
+    assert(!res2.isDefined)
     res.reader.discard()
     assertSecondRequestOk()
   })
@@ -202,6 +211,7 @@ abstract class AbstractStreamingTest extends FunSuite {
     Closable.all(server, client1, client2, closable).close()
   }
 
+  if (!sys.props.contains("SKIP_FLAKY"))
   test("server: response stream fails write") {
     val buf = Buf.Utf8(".")
     val n = new AtomicInteger(0)
@@ -328,6 +338,27 @@ abstract class AbstractStreamingTest extends FunSuite {
     Closable.all(server, client1, client2).close()
   }
 
+  test("end-to-end: server gets content for chunked request made to client with content length") {
+    val svc = Service.mk[Request, Response] { req =>
+      assert(req.contentString == "hello")
+      Future.value(Response(req))
+    }
+
+    val server = startServer(svc, identity)
+
+    val writer = Reader.writable()
+    val req = Request(Version.Http11, Method.Post, "/foo", writer)
+    req.headerMap.put("Content-Length", "5")
+    req.setChunked(true)
+
+    val client = connect(server.boundAddress, identity, "client")
+    val res = client(req)
+    await(writer.write(Buf.Utf8("hello")))
+    writer.close()
+    await(res)
+    Closable.all(server, client).close()
+  }
+
   test("end-to-end: client may process multiple streaming requests simultaneously") {
     val service = Service.mk[Request, Response] { req =>
       val writable = Reader.writable() // never gets closed
@@ -409,7 +440,7 @@ object StreamingTest {
 
   def ok(readerIn: Reader) = {
     val res = Response(Version.Http11, Status.Ok, readerIn)
-    res.headers.set("Connection", "close")
+    res.headerMap.set("Connection", "close")
     res
   }
 
@@ -417,12 +448,16 @@ object StreamingTest {
 
   def modifiedTransporterFn(
     mod: Modifier,
-    fn: Stack.Params => Transporter[Any, Any]
-  ): Stack.Params => Transporter[Any, Any] = { params: Stack.Params =>
-    val underlying = fn(params)
-    new Transporter[Any, Any] {
-      def apply(addr: SocketAddress): Future[Transport[Any, Any]] = {
-        underlying(addr).map(mod)
+    fn: Stack.Params => SocketAddress => Transporter[Any, Any]
+  ): Stack.Params => SocketAddress => Transporter[Any, Any] = { params: Stack.Params =>
+    { addr =>
+      val underlying = fn(params)(addr)
+      new Transporter[Any, Any] {
+        def apply(): Future[Transport[Any, Any]] = {
+          underlying().map(mod)
+        }
+
+        def remoteAddress: SocketAddress = underlying.remoteAddress
       }
     }
   }

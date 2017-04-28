@@ -1,13 +1,14 @@
 package com.twitter.finagle.netty3
 
 import com.twitter.finagle._
+import com.twitter.finagle.IOExceptionStrings.FinestIOExceptionMessages
 import com.twitter.finagle.netty3.channel._
 import com.twitter.finagle.netty3.param.Netty3Timer
 import com.twitter.finagle.netty3.ssl.SslListenerConnectionHandler
 import com.twitter.finagle.netty3.transport.ChannelTransport
 import com.twitter.finagle.param.{Label, Logger, Stats, Timer}
 import com.twitter.finagle.server.{Listener, ServerRegistry}
-import com.twitter.finagle.ssl.Engine
+import com.twitter.finagle.ssl.server.{SslServerConfiguration, SslServerEngineFactory}
 import com.twitter.finagle.stats.{ServerStatsReceiver, StatsReceiver}
 import com.twitter.finagle.transport.Transport
 import com.twitter.logging.HasLogLevel
@@ -90,9 +91,12 @@ object Netty3Listener {
     }
   }
 
-  def addTlsToPipeline(pipeline: ChannelPipeline, newEngine: () => Engine) {
-    val engine = newEngine()
-    engine.self.setUseClientMode(false)
+  def addTlsToPipeline(
+    pipeline: ChannelPipeline,
+    engineFactory: SslServerEngineFactory,
+    config: SslServerConfiguration
+  ): Unit = {
+    val engine = engineFactory(config)
     val handler = new SslHandler(engine.self)
 
     // Certain engine implementations need to handle renegotiation internally,
@@ -266,8 +270,12 @@ class Netty3Listener[In, Out](
   }
 
   private[this] def addFirstTlsHandlers(pipeline: ChannelPipeline, params: Stack.Params): Unit = {
-    val Transport.TLSServerEngine(engine) = params[Transport.TLSServerEngine]
-    engine.foreach(newEngine => addTlsToPipeline(pipeline, newEngine))
+    val SslServerEngineFactory.Param(serverEngine) = params[SslServerEngineFactory.Param]
+    val Transport.ServerSsl(serverConfig) = params[Transport.ServerSsl]
+
+    for (config <- serverConfig) {
+      addTlsToPipeline(pipeline, serverEngine, config)
+    }
   }
 
   private[this] def addLastRequestStatsHandlers(
@@ -342,15 +350,6 @@ class Netty3Listener[In, Out](
   override def toString: String = "Netty3Listener"
 }
 
-private[netty3] object ServerBridge {
-  private val FinestIOExceptionMessages = Set(
-    "Connection reset by peer",
-    "Broken pipe",
-    "Connection timed out",
-    "No route to host",
-    "")
-}
-
 /**
  * Bridges a channel (pipeline) onto a transport. This must be
  * installed as the last handler.
@@ -361,7 +360,6 @@ private[netty3] class ServerBridge[In, Out](
     statsReceiver: StatsReceiver,
     channels: ChannelGroup)
   extends SimpleChannelHandler {
-  import ServerBridge.FinestIOExceptionMessages
 
   private[this] val readTimeoutCounter = statsReceiver.counter("read_timeout")
   private[this] val writeTimeoutCounter = statsReceiver.counter("write_timeout")
@@ -383,7 +381,7 @@ private[netty3] class ServerBridge[In, Out](
     val channel = e.getChannel
     channels.add(channel)
 
-    val transport = Transport.cast[In, Out](new ChannelTransport[Any, Any](channel))
+    val transport = Transport.cast[In, Out](classOf[Any].asInstanceOf[Class[Out]], new ChannelTransport[Any, Any](channel))  // We are lying about this type
     serveTransport(transport)
     super.channelOpen(ctx, e)
   }

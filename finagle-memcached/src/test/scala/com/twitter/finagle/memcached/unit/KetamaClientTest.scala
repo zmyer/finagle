@@ -4,16 +4,15 @@ import com.twitter.concurrent.Broker
 import com.twitter.finagle._
 import com.twitter.finagle.memcached._
 import com.twitter.finagle.memcached.protocol._
-import com.twitter.hashing.KeyHasher
 import com.twitter.io.Buf
-import com.twitter.util.{ReadWriteVar, Await, Duration, Future}
-import scala.collection.{immutable, mutable}
+import com.twitter.util.{ReadWriteVar, Await, Future}
+import scala.collection.mutable
 import _root_.java.io.{BufferedReader, InputStreamReader}
 import org.junit.runner.RunWith
 import org.mockito.Matchers._
 import org.mockito.Mockito.{verify, verifyZeroInteractions, when, times, RETURNS_SMART_NULLS}
 import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 import org.scalatest.FunSuite
 
 @RunWith(classOf[JUnitRunner])

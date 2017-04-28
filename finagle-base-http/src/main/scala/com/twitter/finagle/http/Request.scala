@@ -62,22 +62,46 @@ abstract class Request extends Message {
   /**
    * Returns the HTTP method of this request.
    */
-  def method: Method = from(getMethod())
+  def method: Method = from(httpRequest.getMethod())
 
   /**
    * Sets the HTTP method of this request to the given `method`.
+   *
+   * * @see [[method(Method)]] for Java users.
    */
-  def method_=(method: Method): Unit = setMethod(from(method))
+  def method_=(method: Method): Unit = httpRequest.setMethod(from(method))
+
+  /**
+   * Sets the HTTP method of this request to the given `method`.
+   *
+   * @see [[method_=(Method)]] for Scala users.
+   */
+  final def method(method: Method): this.type = {
+    this.method = method
+    this
+  }
 
   /**
    * Returns the URI of this request.
    */
-  def uri: String = getUri()
+  def uri: String = httpRequest.getUri()
+
+  /**
+   * Set the URI of this request.
+   *
+   * @see [[uri_=(String)]] for Scala users.
+   */
+  final def uri(value: String): this.type = {
+    uri = value
+    this
+  }
 
   /**
    * Set the URI of this request to the given `uri`.
+   *
+   * @see [[uri(String)]] for Java users.
    */
-  def uri_=(uri: String): Unit = setUri(uri)
+  def uri_=(uri: String): Unit = httpRequest.setUri(uri)
 
   /** Path from URI. */
   @BeanProperty
@@ -213,14 +237,11 @@ abstract class Request extends Message {
   override def toString: String =
     s"""Request("$method $uri", from $remoteSocketAddress)"""
 
+  @deprecated("Going away as part of the Netty 4 transition", "2017-01-26")
   protected[finagle] def httpRequest: HttpRequest
-  protected[finagle] def getHttpRequest(): HttpRequest = httpRequest
-  protected[finagle] def httpMessage: HttpMessage = httpRequest
 
-  protected[finagle] def getMethod(): HttpMethod = httpRequest.getMethod
-  protected[finagle] def setMethod(method: HttpMethod): Unit = httpRequest.setMethod(method)
-  protected[finagle] def getUri(): String = httpRequest.getUri()
-  protected[finagle] def setUri(uri: String): Unit = httpRequest.setUri(uri)
+  @deprecated("Going away as part of the Netty 4 transition", "2017-01-26")
+  protected def httpMessage: HttpMessage = httpRequest
 }
 
 

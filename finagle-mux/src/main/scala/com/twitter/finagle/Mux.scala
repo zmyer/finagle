@@ -4,10 +4,10 @@ import com.twitter.conversions.storage._
 import com.twitter.finagle.client._
 import com.twitter.finagle.factory.BindingFactory
 import com.twitter.finagle.filter.PayloadSizeFilter
+import com.twitter.finagle.liveness.FailureDetector
 import com.twitter.finagle.mux.lease.exp.Lessor
-import com.twitter.finagle.mux.transport.{Message, MuxFramer, Netty3Framer, Netty4Framer}
-import com.twitter.finagle.mux.{FailureDetector, Handshake, Toggles}
-import com.twitter.finagle.netty3.{Netty3Listener, Netty3Transporter}
+import com.twitter.finagle.mux.transport._
+import com.twitter.finagle.mux.{Handshake, Toggles}
 import com.twitter.finagle.netty4.{Netty4Listener, Netty4Transporter}
 import com.twitter.finagle.param.{ProtocolLibrary, WithDefaultLoadBalancer}
 import com.twitter.finagle.pool.SingletonPool
@@ -62,23 +62,17 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
      * servers and clients can use the same parameter).
      */
     case class MuxImpl(
-        transporter: Stack.Params => Transporter[Buf, Buf],
+        transporter: Stack.Params => SocketAddress => Transporter[Buf, Buf],
         listener: Stack.Params => Listener[Buf, Buf]) {
       def mk(): (MuxImpl, Stack.Param[MuxImpl]) =
         (this, MuxImpl.param)
     }
 
-    object MuxImpl {
-      private val UseNetty4ToggleId: String = "com.twitter.finagle.mux.UseNetty4"
-      private val netty4Toggle: Toggle[Int] = Toggles(UseNetty4ToggleId)
-      private def useNetty4: Boolean = netty4Toggle(ServerInfo().id.hashCode)
 
-      /**
-       * A [[MuxImpl]] that uses netty3 as the underlying I/O multiplexer.
-       */
-      val Netty3 = MuxImpl(
-        params => Netty3Transporter(Netty3Framer, params),
-        params => Netty3Listener(Netty3Framer, params))
+    object MuxImpl {
+      private val RefCountToggleId: String = "com.twitter.finagle.mux.RefCountControlMessages"
+      private val refCountControlToggle: Toggle[Int] = Toggles(RefCountToggleId)
+      private def refCountControl: Boolean = refCountControlToggle(ServerInfo().id.hashCode)
 
       /**
        * A [[MuxImpl]] that uses netty4 as the underlying I/O multiplexer.
@@ -86,13 +80,30 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
        * @note this is experimental and not yet tested in production.
        */
       val Netty4 = MuxImpl(
-        params => Netty4Transporter(Netty4Framer, params),
-        params => Netty4Listener(Netty4Framer, params))
+        params => Netty4Transporter.raw(CopyingFramer, _, params),
+        params => Netty4Listener(CopyingFramer, params))
 
+      /**
+       * A [[MuxImpl]] that uses netty4 as the underlying I/O multiplexer and
+       * ref-counts inbound mux control messages. No application changes are
+       * required to use this implementation.
+       *
+       * @note this is experimental and not yet tested in production.
+       */
+      val Netty4RefCountingControl = MuxImpl(
+        params => Netty4Transporter.raw(
+          RefCountingFramer,
+          _,
+          params,
+          transportFactory = new RefCountingTransport(_)
+        ),
+        params => Netty4Listener(CopyingFramer, params)
+      )
 
       implicit val param = Stack.Param(
-        if (useNetty4) Netty4
-        else Netty3
+        // note that ref-counting toggle is dependent on n4 toggle.
+        if (refCountControl) Netty4RefCountingControl
+        else Netty4
       )
     }
   }
@@ -192,8 +203,8 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
 
     private[this] val statsReceiver = params[fparam.Stats].statsReceiver.scope("mux")
 
-    protected def newTransporter(): Transporter[In, Out] =
-      params[param.MuxImpl].transporter(params)
+    protected def newTransporter(addr: SocketAddress): Transporter[In, Out] =
+      params[param.MuxImpl].transporter(params)(addr)
 
     protected def newDispatcher(
       transport: Transport[In, Out]

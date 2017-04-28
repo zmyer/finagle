@@ -5,18 +5,18 @@ import com.twitter.finagle.context
 import com.twitter.finagle.context.Contexts
 import com.twitter.finagle.factory.{
   BindingFactory, RefcountedFactory, StatsFactoryWrapper, TimeoutFactory}
-import com.twitter.finagle.filter.{ClearContextValueFilter, DtabStatsFilter, ExceptionSourceFilter, MonitorFilter}
+import com.twitter.finagle.filter._
+import com.twitter.finagle.liveness.FailureAccrualFactory
 import com.twitter.finagle.loadbalancer.LoadBalancerFactory
 import com.twitter.finagle.param._
 import com.twitter.finagle.service._
-import com.twitter.finagle.stack.Endpoint
 import com.twitter.finagle.stack.nilStack
 import com.twitter.finagle.stats.{LoadedHostStatsReceiver, ClientStatsReceiver}
 import com.twitter.finagle.tracing._
 import com.twitter.finagle.transport.Transport
 import com.twitter.finagle.util.Showable
-import com.twitter.util.Future
 import com.twitter.util.registry.GlobalRegistry
+import java.net.{SocketAddress, InetSocketAddress}
 
 object StackClient {
   /**
@@ -42,7 +42,7 @@ object StackClient {
    * @see [[com.twitter.finagle.service.PendingRequestFilter]]
    * @see [[com.twitter.finagle.client.DefaultPool]]
    * @see [[com.twitter.finagle.service.TimeoutFilter]]
-   * @see [[com.twitter.finagle.service.FailureAccrualFactory]]
+   * @see [[com.twitter.finagle.liveness.FailureAccrualFactory]]
    * @see [[com.twitter.finagle.service.StatsServiceFactory]]
    * @see [[com.twitter.finagle.service.StatsFilter]]
    * @see [[com.twitter.finagle.filter.DtabStatsFilter]]
@@ -258,6 +258,13 @@ object StackClient {
      *    appear below `FactoryToService` so that services are not
      *    prematurely closed by `FactoryToService`.
      *
+     *  * `NackAdmissionFilter` probabilistically drops requests if the client
+     *    is receiving a large fraction of nack responses. This indicates an
+     *    overload situation. Since this filter should operate on all requests
+     *    sent over the wire including retries, it must be below `Retries`.
+     *    Since it aggregates the status of the entire cluster, it must be above
+     *    `LoadBalancerFactory` (not part of the endpoint stack).
+     *
      *  * `FactoryToService` acquires a new endpoint service from the
      *    load balancer on each request (and closes it after the
      *    response completes).
@@ -281,6 +288,7 @@ object StackClient {
       new RefcountedFactory(fac))
     stk.push(TimeoutFactory.module)
     stk.push(Role.prepFactory, identity[ServiceFactory[Req, Rep]](_))
+    stk.push(NackAdmissionFilter.module)
     stk.push(FactoryToService.module)
     stk.push(Retries.moduleRequeueable)
     stk.push(ClearContextValueFilter.module(context.Retries))
@@ -415,12 +423,12 @@ trait StackClient[Req, Rep] extends StackBasedClient[Req, Rep]
  * The standard template implementation for
  * [[com.twitter.finagle.client.StackClient]].
  *
- * @see The [[http://twitter.github.io/finagle/guide/Clients.html user guide]]
+ * @see The [[https://twitter.github.io/finagle/guide/Clients.html user guide]]
  *      for further details on Finagle clients and their configuration.
-  * @see [[StackClient.newStack]] for the default modules used by Finagle
+ * @see [[StackClient.newStack]] for the default modules used by Finagle
  *      clients.
  */
-trait StdStackClient[Req, Rep, This <: StdStackClient[Req, Rep, This]]
+trait EndpointerStackClient[Req, Rep, This <: EndpointerStackClient[Req, Rep, This]]
   extends StackClient[Req, Rep]
   with Stack.Parameterized[This]
   with CommonParams[This]
@@ -428,33 +436,16 @@ trait StdStackClient[Req, Rep, This <: StdStackClient[Req, Rep, This]]
   with WithClientAdmissionControl[This]
   with WithClientTransport[This]
   with WithClientSession[This]
-  with WithSessionQualifier[This] { self =>
+  with WithSessionQualifier[This] {
 
   /**
-   * The type we write into the transport.
-   */
-  protected type In
-
-  /**
-   * The type we read out of the transport.
-   */
-  protected type Out
-
-  /**
-   * Defines a typed [[com.twitter.finagle.client.Transporter]] for this client.
+   * Defines the service factory, which establishes connections to a remote
+   * peer on apply and returns a service which can write messages onto
+   * the wire and read them off of the wire.
+   *
    * Concrete StackClient implementations are expected to specify this.
    */
-  protected def newTransporter(): Transporter[In, Out]
-
-  /**
-   * Defines a dispatcher, a function which reconciles the stream based
-   * `Transport` with a Request/Response oriented `Service`.
-   * Together with a `Transporter`, it forms the foundation of a
-   * finagle client. Concrete implementations are expected to specify this.
-   *
-   * @see [[com.twitter.finagle.dispatch.GenSerialServerDispatcher]]
-   */
-  protected def newDispatcher(transport: Transport[In, Out]): Service[Req, Rep]
+  protected def endpointer: Stackable[ServiceFactory[Req, Rep]]
 
   def withStack(stack: Stack[ServiceFactory[Req, Rep]]): This =
     copy1(stack = stack)
@@ -513,47 +504,7 @@ trait StdStackClient[Req, Rep, This <: StdStackClient[Req, Rep, This]]
    */
   protected def copy1(
     stack: Stack[ServiceFactory[Req, Rep]] = this.stack,
-    params: Stack.Params = this.params): This { type In = self.In; type Out = self.Out }
-
-  /**
-   * A stackable module that creates new `Transports` (via transporter)
-   * when applied.
-   */
-  protected def endpointer: Stackable[ServiceFactory[Req, Rep]] =
-    new Stack.Module[ServiceFactory[Req, Rep]] {
-      val role = Endpoint
-      val description = "Send requests over the wire"
-      val parameters = Seq(implicitly[Stack.Param[Transporter.EndpointAddr]])
-      def make(prms: Stack.Params, next: Stack[ServiceFactory[Req, Rep]]) = {
-        val Transporter.EndpointAddr(addr) = prms[Transporter.EndpointAddr]
-        val factory = addr match {
-          case com.twitter.finagle.exp.Address.ServiceFactory(sf: ServiceFactory[Req, Rep], _) => sf
-          case Address.Failed(e) => new FailingFactory[Req, Rep](e)
-          case Address.Inet(ia, _) =>
-            val endpointClient = copy1(params=prms)
-            val transporter = endpointClient.newTransporter()
-            // Export info about the transporter type so that we can query info
-            // about its implementation at runtime. This assumes that the `toString`
-            // of the implementation is sufficiently descriptive.
-            val transporterImplKey = Seq(
-              ClientRegistry.registryName,
-              endpointClient.params[ProtocolLibrary].name,
-              endpointClient.params[Label].label,
-              "Transporter")
-            GlobalRegistry.get.put(transporterImplKey, transporter.toString)
-            val mkFutureSvc: () => Future[Service[Req, Rep]] =
-              () => transporter(ia).map { trans =>
-                // we do not want to capture and request specific Locals
-                // that would live for the life of the session.
-                Contexts.letClearAll {
-                  endpointClient.newDispatcher(trans)
-                }
-              }
-            ServiceFactory(mkFutureSvc)
-        }
-        Stack.Leaf(this, factory)
-      }
-    }
+    params: Stack.Params = this.params): This
 
   /**
    * @inheritdoc
@@ -589,4 +540,73 @@ trait StdStackClient[Req, Rep, This <: StdStackClient[Req, Rep, This]]
     ).newClient(dest, label)
     new FactoryToService[Req, Rep](client)
   }
+}
+
+trait StdStackClient[Req, Rep, This <: StdStackClient[Req, Rep, This]]
+  extends EndpointerStackClient[Req, Rep, This] { self =>
+
+  /**
+   * The type we write into the transport.
+   */
+  protected type In
+
+  /**
+   * The type we read out of the transport.
+   */
+  protected type Out
+
+  /**
+   * Defines a typed [[com.twitter.finagle.client.Transporter]] for this client.
+   * Concrete StackClient implementations are expected to specify this.
+   */
+  protected def newTransporter(addr: SocketAddress): Transporter[In, Out]
+
+  /**
+   * Defines a dispatcher, a function which reconciles the stream based
+   * `Transport` with a Request/Response oriented `Service`.
+   * Together with a `Transporter`, it forms the foundation of a
+   * finagle client. Concrete implementations are expected to specify this.
+   *
+   * @see [[com.twitter.finagle.dispatch.GenSerialServerDispatcher]]
+   */
+  protected def newDispatcher(transport: Transport[In, Out]): Service[Req, Rep]
+
+  /**
+   * A copy constructor in lieu of defining StackClient as a
+   * case class.
+   */
+  override protected def copy1(
+    stack: Stack[ServiceFactory[Req, Rep]] = this.stack,
+    params: Stack.Params = this.params): This { type In = self.In; type Out = self.Out }
+
+  /**
+   * A stackable module that creates new `Transports` (via transporter)
+   * when applied.
+   */
+  protected final def endpointer: Stackable[ServiceFactory[Req, Rep]] =
+    new EndpointerModule[Req, Rep](
+      Seq(implicitly[Stack.Param[ProtocolLibrary]], implicitly[Stack.Param[Label]]),
+      { (prms: Stack.Params, ia: InetSocketAddress) =>
+        val endpointClient = self.copy1(params=prms)
+        val transporter = endpointClient.newTransporter(ia)
+        // Export info about the transporter type so that we can query info
+        // about its implementation at runtime. This assumes that the `toString`
+        // of the implementation is sufficiently descriptive.
+        val transporterImplKey = Seq(
+          ClientRegistry.registryName,
+          endpointClient.params[ProtocolLibrary].name,
+          endpointClient.params[Label].label,
+          "Transporter")
+        GlobalRegistry.get.put(transporterImplKey, transporter.toString)
+        ServiceFactory.apply[Req, Rep] { () =>
+          // we do not want to capture and request specific Locals
+          // that would live for the life of the session.
+          Contexts.letClearAll {
+            transporter().map { trans =>
+              endpointClient.newDispatcher(trans)
+            }
+          }
+        }
+      }
+    )
 }

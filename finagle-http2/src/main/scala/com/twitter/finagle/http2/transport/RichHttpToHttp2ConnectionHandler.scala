@@ -1,6 +1,6 @@
 package com.twitter.finagle.http2.transport
 
-import com.twitter.finagle.http2.transport.Http2ClientDowngrader.{Message, Rst}
+import com.twitter.finagle.http2.transport.Http2ClientDowngrader.{Message, Rst, Ping}
 import com.twitter.logging.Logger
 import io.netty.channel.{ChannelHandlerContext, ChannelPromise}
 import io.netty.handler.codec.http._
@@ -16,7 +16,8 @@ import scala.util.control.NonFatal
 private[http2] class RichHttpToHttp2ConnectionHandler(
     dec: Http2ConnectionDecoder,
     enc: Http2ConnectionEncoder,
-    initialSettings: Http2Settings)
+    initialSettings: Http2Settings,
+    onActive: () => Unit)
   extends HttpToHttp2ConnectionHandler(dec, enc, initialSettings, false) {
 
   private[this] val log = Logger.get(getClass.getName)
@@ -27,9 +28,8 @@ private[http2] class RichHttpToHttp2ConnectionHandler(
     msg: HttpObject,
     streamId: Int
   ): Unit = {
-    val combiner = new PromiseCombiner()
-
     try {
+      val combiner = new PromiseCombiner()
       msg match {
         case req: HttpRequest =>
           val headers = HttpConversionUtil.toHttp2Headers(req, false /* validateHeaders */)
@@ -67,8 +67,8 @@ private[http2] class RichHttpToHttp2ConnectionHandler(
           }
         case _ => // nop
       }
+      combiner.finish(promise)
     } catch {
-
       case e: Http2Exception =>
         val status = if (e.isInstanceOf[HeaderListSizeException])
           HttpResponseStatus.REQUEST_HEADER_FIELDS_TOO_LARGE
@@ -78,12 +78,11 @@ private[http2] class RichHttpToHttp2ConnectionHandler(
           status
         )
         ctx.fireChannelRead(Http2ClientDowngrader.Message(rep, streamId))
+        promise.trySuccess()
+
       case NonFatal(e) =>
-        val p = ctx.newPromise()
-        p.setFailure(e)
-        combiner.add(p)
-    } finally {
-      combiner.finish(promise)
+        promise.setFailure(e)
+
     }
   }
 
@@ -93,7 +92,9 @@ private[http2] class RichHttpToHttp2ConnectionHandler(
         handleMessage(ctx, promise, obj, streamId)
       case Rst(streamId, errorCode) =>
         encoder.writeRstStream(ctx, streamId, errorCode, promise)
-      // TODO we need to add support for writing RSTs and GOAWAYs
+      case Ping =>
+        encoder.writePing(ctx, false /* ack */, Http2CodecUtil.emptyPingBuf, promise)
+      // TODO we need to add support for writing GOAWAYs
       case _ =>
         val wrongType = new IllegalArgumentException(
           s"Expected a Message, got ${msg.getClass.getName} instead.")
@@ -101,4 +102,10 @@ private[http2] class RichHttpToHttp2ConnectionHandler(
         promise.setFailure(wrongType)
     }
   }
+
+  override def handlerAdded(ctx: ChannelHandlerContext) {
+    super.handlerAdded(ctx)
+    onActive()
+  }
+
 }

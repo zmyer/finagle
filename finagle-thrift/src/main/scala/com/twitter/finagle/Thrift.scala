@@ -1,6 +1,6 @@
 package com.twitter.finagle
 
-import com.twitter.finagle.client.{StackClient, StdStackClient, Transporter}
+import com.twitter.finagle.client.{ClientRegistry, StackClient, StdStackClient, Transporter}
 import com.twitter.finagle.dispatch.GenSerialClientDispatcher
 import com.twitter.finagle.param.{ExceptionStatsHandler => _, Monitor => _, ResponseClassifier => _, Tracer => _, _}
 import com.twitter.finagle.server.{Listener, ServerInfo, StackServer, StdStackServer}
@@ -127,7 +127,7 @@ object Thrift
    * entering the Finagle transport types.
    */
   case class ThriftImpl(
-      transporter: Stack.Params => Transporter[ThriftClientRequest, Array[Byte]],
+      transporter: Stack.Params => SocketAddress => Transporter[ThriftClientRequest, Array[Byte]],
       listener: Stack.Params => Listener[Array[Byte], Array[Byte]]) {
 
     def mk(): (ThriftImpl, Stack.Param[ThriftImpl]) = (this, ThriftImpl.param)
@@ -213,9 +213,9 @@ object Thrift
   /**
    * A ThriftMux `com.twitter.finagle.Client`.
    *
-   * @see [[http://twitter.github.io/finagle/guide/Configuration.html#clients-and-servers Configuration]] documentation
-   * @see [[http://twitter.github.io/finagle/guide/Protocols.html#thrift Thrift]] documentation
-   * @see [[http://twitter.github.io/finagle/guide/Protocols.html#mux Mux]] documentation
+   * @see [[https://twitter.github.io/finagle/guide/Configuration.html#clients-and-servers Configuration]] documentation
+   * @see [[https://twitter.github.io/finagle/guide/Protocols.html#thrift Thrift]] documentation
+   * @see [[https://twitter.github.io/finagle/guide/Protocols.html#mux Mux]] documentation
    */
   case class Client(
       stack: Stack[ServiceFactory[ThriftClientRequest, Array[Byte]]] = Client.stack,
@@ -238,7 +238,8 @@ object Thrift
     protected val param.ProtocolFactory(protocolFactory) = params[param.ProtocolFactory]
     override protected lazy val Stats(stats) = params[Stats]
 
-    protected def newTransporter(): Transporter[In, Out] = params[ThriftImpl].transporter(params)
+    protected def newTransporter(addr: SocketAddress): Transporter[In, Out] =
+      params[ThriftImpl].transporter(params)(addr)
 
     protected def newDispatcher(
       transport: Transport[ThriftClientRequest, Array[Byte]]
@@ -293,8 +294,10 @@ object Thrift
     override def newClient(
       dest: Name,
       label: String
-    ): ServiceFactory[ThriftClientRequest, Array[Byte]] =
+    ): ServiceFactory[ThriftClientRequest, Array[Byte]] = {
+      clientId.foreach(id => ClientRegistry.export(params, "ClientId", id.name))
       deserializingClassifier.superNewClient(dest, label)
+    }
 
     // Java-friendly forwarders
     // See https://issues.scala-lang.org/browse/SI-8905
@@ -390,8 +393,8 @@ object Thrift
   /**
    * A ThriftMux `com.twitter.finagle.Server`.
    *
-   * @see [[http://twitter.github.io/finagle/guide/Configuration.html#clients-and-servers Configuration]] documentation
-   * @see [[http://twitter.github.io/finagle/guide/Protocols.html#thrift Thrift]] documentation
+   * @see [[https://twitter.github.io/finagle/guide/Configuration.html#clients-and-servers Configuration]] documentation
+   * @see [[https://twitter.github.io/finagle/guide/Protocols.html#thrift Thrift]] documentation
    */
   case class Server(
     stack: Stack[ServiceFactory[Array[Byte], Array[Byte]]] = Server.stack,

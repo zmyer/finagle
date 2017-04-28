@@ -1,17 +1,17 @@
 package com.twitter.finagle.netty4.http
 
+import com.twitter.conversions.storage._
 import com.twitter.finagle.http
 import com.twitter.finagle.{Status => _, _}
 import com.twitter.finagle.client.Transporter
-import com.twitter.finagle.netty4.DirectToHeapInboundHandlerName
-import com.twitter.finagle.netty4.channel.DirectToHeapInboundHandler
-import com.twitter.finagle.netty4.http.handler.{
-  BadRequestHandler, FixedLengthMessageAggregator, PayloadSizeHandler, RespondToExpectContinue}
-import com.twitter.finagle.netty4.{Netty4Listener, Netty4Transporter}
+import com.twitter.finagle.netty4.{AnyToHeapInboundHandlerName, Netty4Listener, Netty4Transporter}
+import com.twitter.finagle.netty4.channel.AnyToHeapInboundHandler
+import com.twitter.finagle.netty4.http.handler._
 import com.twitter.finagle.param.Logger
 import com.twitter.finagle.server.Listener
 import io.netty.channel._
 import io.netty.handler.codec.{http => NettyHttp}
+import java.net.SocketAddress
 
 /**
  * The `exp` package contains params to configure the underlying netty version
@@ -26,7 +26,6 @@ object exp {
   private[finagle] val HttpCodecName = "httpCodec"
 
   private[finagle] def initClient(params: Stack.Params): ChannelPipeline => Unit = {
-    val maxChunkSize = params[http.param.MaxChunkSize].size
     val maxResponseSize = params[http.param.MaxResponseSize].size
     val decompressionEnabled = params[http.param.Decompression].enabled
     val streaming = params[http.param.Streaming].enabled
@@ -35,20 +34,31 @@ object exp {
       if (decompressionEnabled)
         pipeline.addLast("httpDecompressor", new NettyHttp.HttpContentDecompressor)
 
-      if (streaming)
-        pipeline.addLast("fixedLenAggregator", new FixedLengthMessageAggregator(maxChunkSize))
-      else {
+      if (streaming) {
+        // 8 KB is the size of the maxChunkSize parameter used in netty3,
+        // which is where it stops attempting to aggregate messages that lack
+        // a 'Transfer-Encoding: chunked' header.
+        pipeline.addLast("fixedLenAggregator", new FixedLengthMessageAggregator(8.kilobytes))
+      } else {
         pipeline.addLast(
           "httpDechunker",
           new NettyHttp.HttpObjectAggregator(maxResponseSize.inBytes.toInt)
         )
       }
+      // Map some client related channel exceptions to something meaningful to finagle
+      pipeline.addLast("clientExceptionMapper", ClientExceptionMapper)
 
+      pipeline.addLast(AnyToHeapInboundHandlerName, AnyToHeapInboundHandler)
     }
   }
 
-  private[finagle] val Netty4HttpTransporter: Stack.Params => Transporter[Any, Any] =
-    (params: Stack.Params) => { Netty4Transporter(ClientPipelineInit(params), params) }
+  private[finagle] val Netty4HttpTransporter: Stack.Params => SocketAddress => Transporter[Any, Any] =
+    (params: Stack.Params) =>
+      (addr: SocketAddress) => Netty4Transporter.raw(
+        pipelineInit = ClientPipelineInit(params),
+        addr = addr,
+        params = params
+      )
 
   private[finagle] val ClientPipelineInit: Stack.Params => ChannelPipeline => Unit = {
     params: Stack.Params =>
@@ -56,8 +66,6 @@ object exp {
         val maxChunkSize = params[http.param.MaxChunkSize].size
         val maxHeaderSize = params[http.param.MaxHeaderSize].size
         val maxInitialLineSize = params[http.param.MaxInitialLineSize].size
-
-        pipeline.addLast(DirectToHeapInboundHandlerName, DirectToHeapInboundHandler)
 
         val codec = new NettyHttp.HttpClientCodec(
           maxInitialLineSize.inBytes.toInt,
@@ -110,6 +118,8 @@ object exp {
 
       // We need to handle bad requests as the dispatcher doesn't know how to handle them.
       pipeline.addLast("badRequestHandler", BadRequestHandler)
+
+      pipeline.addLast(AnyToHeapInboundHandlerName, AnyToHeapInboundHandler)
     }
   }
 
@@ -126,17 +136,15 @@ object exp {
           maxRequestSize.inBytes.toInt
         )
 
-        pipeline.addLast(DirectToHeapInboundHandlerName, DirectToHeapInboundHandler)
         pipeline.addLast(HttpCodecName, codec)
 
         initServer(params)(pipeline)
       }
   }
 
-  private[finagle] val Netty4HttpListener: Stack.Params => Listener[Any, Any] = (params: Stack.Params) => {
-      Netty4Listener[Any, Any](
-        params = params,
-        pipelineInit = ServerPipelineInit(params)
-      )
-    }
+  private[finagle] val Netty4HttpListener: Stack.Params => Listener[Any, Any] = (params: Stack.Params) =>
+    Netty4Listener[Any, Any](
+      params = params,
+      pipelineInit = ServerPipelineInit(params)
+    )
 }

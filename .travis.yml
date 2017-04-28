@@ -8,25 +8,21 @@ env:
     - JAVA_OPTS="-DSKIP_FLAKY=1 -Dsbt.log.noformat=true"
 
   matrix:
-    - PROJECT=finagle-commons-stats
     - PROJECT=finagle-core
     - PROJECT=finagle-exception
     - PROJECT=finagle-exp
     - PROJECT=finagle-http
-    - PROJECT=finagle-http-compat
     - PROJECT=finagle-http2
     - PROJECT=finagle-integration
     - PROJECT=finagle-kestrel
     - PROJECT=finagle-mdns
     - PROJECT=finagle-mux
     - PROJECT=finagle-mysql
-    - PROJECT=finagle-native
     - PROJECT=finagle-netty4
     - PROJECT=finagle-netty4-http
     - PROJECT=finagle-ostrich4
     - PROJECT=finagle-redis
     - PROJECT=finagle-serversets
-    - PROJECT=finagle-spdy
     - PROJECT=finagle-stats
     - PROJECT=finagle-stream
     - PROJECT=finagle-thrift
@@ -50,6 +46,7 @@ before_cache:
 
 scala:
   - 2.11.8
+  - 2.12.1
 
 jdk:
   - oraclejdk8
@@ -63,7 +60,7 @@ before_script:
   # default $SBT_OPTS is irrelevant to sbt lancher
   - unset SBT_OPTS
   - curl -s https://raw.githubusercontent.com/twitter/dodo/develop/bin/build | bash -s -- --no-test finagle
-  - travis_retry ./sbt --error ++$TRAVIS_SCALA_VERSION ci:update finagle-memcached/update finagle-native/update
+  - travis_retry ./sbt --error ++$TRAVIS_SCALA_VERSION ci:update finagle-memcached/update
   # don't test these projects because they don't pass on travis-ci
   - ./sbt ++$TRAVIS_SCALA_VERSION finagle-memcached/test:compile
 

@@ -3,7 +3,8 @@ package com.twitter.finagle.transport
 import com.twitter.concurrent.AsyncQueue
 import com.twitter.finagle.context.Contexts
 import com.twitter.finagle.{Stack, Status}
-import com.twitter.finagle.ssl
+import com.twitter.finagle.ssl.client.SslClientConfiguration
+import com.twitter.finagle.ssl.server.SslServerConfiguration
 import com.twitter.io.{Buf, Reader, Writer}
 import com.twitter.util._
 import java.net.SocketAddress
@@ -156,33 +157,25 @@ object Transport {
   }
 
   /**
-   * $param the TLS engine for a `Transport`.
+   * $param the SSL/TLS client configuration for a `Transport`.
    */
-  case class TLSClientEngine(e: Option[SocketAddress => ssl.Engine]) {
-    def mk(): (TLSClientEngine, Stack.Param[TLSClientEngine]) =
-      (this, TLSClientEngine.param)
+  case class ClientSsl(e: Option[SslClientConfiguration]) {
+    def mk(): (ClientSsl, Stack.Param[ClientSsl]) =
+      (this, ClientSsl.param)
   }
-  object TLSClientEngine {
-    implicit val param = Stack.Param(TLSClientEngine(None))
+  object ClientSsl {
+    implicit val param = Stack.Param(ClientSsl(None))
   }
 
   /**
-   * $param the TLS engine for a `Transport`.
+   * $param the SSL/TLS server configuration for a `Transport`.
    */
-  case class TLSServerEngine(e: Option[() => ssl.Engine]) {
-    def mk(): (TLSServerEngine, Stack.Param[TLSServerEngine]) =
-      (this, TLSServerEngine.param)
+  case class ServerSsl(e: Option[SslServerConfiguration]) {
+    def mk(): (ServerSsl, Stack.Param[ServerSsl]) =
+      (this, ServerSsl.param)
   }
-  object TLSServerEngine {
-    implicit val param = Stack.Param(TLSServerEngine(None))
-  }
-
-  /**
-   * $param the TLS config for a `Transport` (default: disabled).
-   */
-  case class Tls(config: TlsConfig)
-  object Tls {
-    implicit val param: Stack.Param[Tls] = Stack.Param(Tls(TlsConfig.Disabled))
+  object ServerSsl {
+    implicit val param = Stack.Param(ServerSsl(None))
   }
 
   /**
@@ -282,18 +275,55 @@ object Transport {
     }
   }
 
-  private[this] val castMapFn: Any => Any = Predef.identity
+  /**
+   * Casts an object transport to `Transport[In1, Out1]`. Note that this is
+   * generally unsafe: only do this when you know the cast is guaranteed safe.
+   * This is useful when coercing a netty object pipeline into a typed transport,
+   * for example.
+   *
+   * @see [[Transport.cast(Class[Out], transport)]] for Java users.
+   */
+  def cast[In1, Out1](trans: Transport[Any, Any])(implicit m: Manifest[Out1]): Transport[In1, Out1] = {
+    val cls = m.runtimeClass.asInstanceOf[Class[Out1]]
+    cast[In1, Out1](cls, trans)
+  }
+
 
   /**
    * Casts an object transport to `Transport[In1, Out1]`. Note that this is
    * generally unsafe: only do this when you know the cast is guaranteed safe.
    * This is useful when coercing a netty object pipeline into a typed transport,
    * for example.
+   *
+   * @see [[Transport.cast(trans)]] for Scala users.
    */
-  def cast[In1, Out1](trans: Transport[Any, Any]): Transport[In1, Out1] =
-    trans.map(
-      castMapFn.asInstanceOf[In1 => Any],
-      castMapFn.asInstanceOf[Any => Out1])
+  def cast[In1, Out1](cls: Class[Out1], trans: Transport[Any, Any]): Transport[In1, Out1] = {
+
+    if (cls.isAssignableFrom(classOf[Any])) {
+      // No need to do any dynamic type checks on Any!
+      trans.asInstanceOf[Transport[In1, Out1]]
+    } else new Transport[In1, Out1] {
+      def write(req: In1): Future[Unit] = trans.write(req)
+      def read(): Future[Out1] = trans.read().flatMap(readFn)
+      def status: Status = trans.status
+      def onClose: Future[Throwable] = trans.onClose
+      def localAddress: SocketAddress = trans.localAddress
+      def remoteAddress: SocketAddress = trans.remoteAddress
+      def peerCertificate: Option[Certificate] = trans.peerCertificate
+      def close(deadline: Time): Future[Unit] = trans.close(deadline)
+      override def toString: String = trans.toString
+
+      private val readFn: Any => Future[Out1] = {
+        case out1 if cls.isAssignableFrom(out1.getClass) => Future.value(out1.asInstanceOf[Out1])
+        case other =>
+          val msg = s"Transport.cast failed. Expected type ${cls.getName} " +
+            s"but found ${other.getClass.getName}"
+          val ex = new ClassCastException(msg)
+          Future.exception(ex)
+      }
+    }
+  }
+
 }
 
 /**

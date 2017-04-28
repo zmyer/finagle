@@ -1,18 +1,20 @@
 package com.twitter.finagle.http2.transport
 
 import com.twitter.concurrent.AsyncQueue
-import com.twitter.finagle.{Status, StreamClosedException, FailureFlags}
+import com.twitter.finagle.{Status, StreamClosedException, FailureFlags, Stack, Failure}
 import com.twitter.finagle.http2.transport.Http2ClientDowngrader._
+import com.twitter.finagle.liveness.FailureDetector
+import com.twitter.finagle.param.Stats
 import com.twitter.finagle.transport.Transport
 import com.twitter.finagle.util.DefaultTimer
 import com.twitter.logging.{Logger, HasLogLevel, Level}
-import com.twitter.util.{Future, Time, Promise, Return, Throw, Try}
+import com.twitter.util.{Future, Time, Promise, Return, Throw, Try, Closable}
 import io.netty.handler.codec.http.{HttpObject, LastHttpContent}
 import io.netty.handler.codec.http2.Http2Error
 import java.net.SocketAddress
 import java.security.cert.Certificate
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 import scala.collection.JavaConverters._
 
 /**
@@ -27,31 +29,53 @@ import scala.collection.JavaConverters._
  */
 private[http2] class MultiplexedTransporter(
     underlying: Transport[StreamMessage, StreamMessage],
-    addr: SocketAddress)
-  extends (() => Try[Transport[HttpObject, HttpObject]]) { self =>
+    addr: SocketAddress,
+    params: Stack.Params)
+  extends (() => Try[Transport[HttpObject, HttpObject]]) with Closable { self =>
 
   import MultiplexedTransporter._
 
   private[this] val log = Logger.get(getClass.getName)
   private[this] val queues: ConcurrentHashMap[Int, AsyncQueue[HttpObject]] =
     new ConcurrentHashMap[Int, AsyncQueue[HttpObject]]()
+
+  private[this] val children =
+    ConcurrentHashMap.newKeySet[ChildTransport]()
+
   private[this] val id = new AtomicInteger(1)
 
   // synchronized by this
-  private[this] var curStreams = 0
   private[this] var dead = false
 
   // exposed for testing
   private[http2] def setStreamId(num: Int): Unit = id.set(num)
 
-  // TODO: the correct goaway behavior is to wait for requests lower than
-  // lastStreamId and assume everything higher will never see a response.
-  // instead, we fail everything else in-flight.
-  private[this] def failEverything(response: HttpObject): Unit = {
-    queues.values.asScala.foreach { q =>
-      q.offer(response)
+  private[this] val FailureDetector.Param(detectorConfig) = params[FailureDetector.Param]
+  private[this] val Stats(statsReceiver) = params[Stats]
+  private[this] val pingPromise = new AtomicReference[Promise[Unit]]()
+
+  private[this] def ping(): Future[Unit] = {
+    val done = new Promise[Unit]
+    if (pingPromise.compareAndSet(null, done)) {
+      underlying.write(Ping).before(done)
+    } else {
+      FuturePingNack
     }
-    queues.clear()
+  }
+
+  private[this] val detector =
+    FailureDetector(detectorConfig, ping, statsReceiver.scope("failuredetector"))
+
+  private[this] def handleGoaway(obj: HttpObject, lastStreamId: Int): Unit = self.synchronized {
+    dead = true
+    children.asScala.foreach { child =>
+      child.synchronized {
+        if (child.curId > lastStreamId) {
+          child.startedStream = false
+          child.close()
+        }
+      }
+    }
   }
 
   private[this] def tryToInitializeQueue(num: Int): AsyncQueue[HttpObject] = {
@@ -78,10 +102,14 @@ private[http2] class MultiplexedTransporter(
 
   private[this] def handleSuccessfulRead(sm: StreamMessage): Unit = sm match {
     case Message(msg, streamId) => tryToInitializeQueue(streamId).offer(msg)
-    case GoAway(response) => failEverything(response)
-    case Rst(streamId, _) =>
-      // TODO clean up handling for various rsts
-      tryToInitializeQueue(streamId).fail(new StreamClosedException(addr, streamId.toString))
+    case GoAway(msg, lastStreamId) => handleGoaway(msg, lastStreamId)
+    case Rst(streamId, errorCode) =>
+      val error = if (errorCode == Http2Error.REFUSED_STREAM.code) Failure.RetryableNackFailure
+      else if (errorCode == Http2Error.ENHANCE_YOUR_CALM.code) Failure.NonRetryableNackFailure
+      else new StreamClosedException(addr, streamId.toString)
+
+      tryToInitializeQueue(streamId).fail(error)
+    case Ping => pingPromise.get.setDone()
     case rep =>
       val name = rep.getClass.getName
       log.error(s"we only support Message, GoAway, Rst right now but got $name. "
@@ -97,6 +125,7 @@ private[http2] class MultiplexedTransporter(
         q.fail(e)
       }
       queues.clear()
+      self.close()
       Future.const(t.cast[Unit])
   }
 
@@ -105,7 +134,6 @@ private[http2] class MultiplexedTransporter(
     .transform(handleRead)
     .before(loop())
 
-  // TODO: clean this up when we figure out the semantics of closing a connection
   loop()
 
   /**
@@ -113,7 +141,8 @@ private[http2] class MultiplexedTransporter(
    * just need a response to advance to the next stream.
    */
   def first(): Transport[HttpObject, HttpObject] = {
-    val ct = createChildTransport()
+    val ct = new ChildTransport()
+    children.add(ct)
 
     ct.synchronized {
       ct.finishedWriting = true
@@ -122,28 +151,20 @@ private[http2] class MultiplexedTransporter(
     ct
   }
 
-  private[this] def createChildTransport(): ChildTransport = self.synchronized {
-    val ct = new ChildTransport()
-    curStreams += 1
-    ct.onClose.ensure {
-      self.synchronized {
-        curStreams -= 1
-        if (curStreams == 0) {
-          dead = true
-          underlying.close()
-        }
-      }
-    }
-
-    ct
-  }
-
   def apply(): Try[Transport[HttpObject, HttpObject]] = self.synchronized {
     if (dead) Throw(new DeadConnectionException(addr, FailureFlags.Retryable))
-    else Return(createChildTransport())
+    else {
+      val ct = new ChildTransport()
+      children.add(ct)
+      Return(ct)
+    }
   }
 
   def onClose: Future[Throwable] = underlying.onClose
+
+  def close(deadline: Time): Future[Unit] = underlying.close(deadline)
+
+  def status: Status = detector.status
 
   /**
    * ChildTransport represents a single http/2 stream at a time.  Once the stream
@@ -163,7 +184,7 @@ private[http2] class MultiplexedTransporter(
     // child class.
 
     // we're going to fix this immediately in incrementStream
-    private[this] var curId = 0
+    private[MultiplexedTransporter] var curId = 0
     private[this] var queue: AsyncQueue[HttpObject] = null
 
     // we keep track of the next read explicitly here to ensure
@@ -173,7 +194,7 @@ private[http2] class MultiplexedTransporter(
 
     private[MultiplexedTransporter] var finishedWriting = false
     private[this] var finishedReading = false
-    private[this] var dead = false
+    private[MultiplexedTransporter] var childDead = false
     private[MultiplexedTransporter] var startedStream = false
 
     private[this] def handleCloses(f: Future[HttpObject]): Unit =
@@ -182,7 +203,7 @@ private[http2] class MultiplexedTransporter(
       }
 
     def write(obj: HttpObject): Future[Unit] = child.synchronized {
-      if (!dead) {
+      if (!childDead) {
         startedStream = true
         val message = Message(obj, curId)
 
@@ -233,7 +254,7 @@ private[http2] class MultiplexedTransporter(
       case _: LastHttpContent =>
         child.synchronized {
           finishedReading = true
-          tryToIncrementStream()
+          if (dead) close() else tryToIncrementStream()
         }
       case _ =>
         // nop
@@ -253,12 +274,11 @@ private[http2] class MultiplexedTransporter(
       val p = Promise[HttpObject]
       result.proxyTo(p)
 
-      // we can improve interrupt behavior here
       p.setInterruptHandler(closeOnInterrupt)
       p
     }
 
-    def status: Status = if (dead) Status.Closed else underlying.status
+    def status: Status = if (childDead) Status.Closed else underlying.status
 
     def onClose: Future[Throwable] = _onClose.or(underlying.onClose)
 
@@ -270,8 +290,8 @@ private[http2] class MultiplexedTransporter(
 
     def close(deadline: Time): Future[Unit] = {
       child.synchronized {
-        if (!dead) {
-          dead = true
+        if (!childDead) {
+          childDead = true
 
           if (startedStream) {
             underlying.write(Rst(curId, Http2Error.CANCEL.code))
@@ -290,6 +310,9 @@ private[http2] class MultiplexedTransporter(
 }
 
 private[http2] object MultiplexedTransporter {
+  val FuturePingNack: Future[Nothing] = Future.exception(Failure(
+    "A ping is already outstanding on this session."))
+
   class DeadConnectionException(
       addr: SocketAddress,
       private[finagle] val flags: Long)

@@ -1,19 +1,30 @@
 package com.twitter.finagle.http2
 
-import com.twitter.finagle.http
 import com.twitter.finagle.Stack
-import com.twitter.finagle.http2.transport.PriorKnowledgeHandler
+import com.twitter.finagle.http
+import com.twitter.finagle.http2.transport.{
+  Http2NackHandler, PriorKnowledgeHandler, RichHttp2ServerDowngrader
+}
 import com.twitter.finagle.netty4.http.exp.{HttpCodecName, initServer}
 import com.twitter.finagle.param.Stats
 import com.twitter.logging.Logger
 import io.netty.channel.socket.SocketChannel
-import io.netty.channel.{Channel, ChannelHandlerContext, ChannelInitializer,
-  ChannelInboundHandlerAdapter}
+import io.netty.channel.{
+  Channel, ChannelHandlerContext, ChannelInboundHandlerAdapter, ChannelInitializer, ChannelOption
+}
 import io.netty.handler.codec.http.HttpServerUpgradeHandler.{
-  SourceCodec, UpgradeCodec, UpgradeCodecFactory}
+  SourceCodec, UpgradeCodec, UpgradeCodecFactory
+}
 import io.netty.handler.codec.http.{FullHttpRequest, HttpServerUpgradeHandler}
 import io.netty.handler.codec.http2.{
-  Http2Codec, Http2CodecUtil, Http2ServerDowngrader, Http2ServerUpgradeCodec, Http2ResetFrame}
+  Http2Codec,
+  Http2CodecUtil,
+  Http2FrameLogger,
+  Http2ResetFrame,
+  Http2ServerUpgradeCodec,
+  Http2StreamChannelBootstrap
+}
+import io.netty.handler.logging.LogLevel
 import io.netty.util.AsciiString
 
 /**
@@ -29,7 +40,9 @@ private[http2] class Http2CleartextServerInitializer(
 
   val initializer = new ChannelInitializer[Channel] {
     def initChannel(ch: Channel): Unit = {
-      ch.pipeline.addLast(new Http2ServerDowngrader(false /*validateHeaders*/))
+      ch.pipeline.addLast(new Http2NackHandler)
+
+      ch.pipeline.addLast(new RichHttp2ServerDowngrader(validateHeaders = false))
 
       // we want to drop reset frames because the Http2ServerDowngrader doesn't know what to
       // do with them, and our dispatchers expect to only get http/1.1 message types.
@@ -44,11 +57,17 @@ private[http2] class Http2CleartextServerInitializer(
     }
   }
 
-  val upgradeCodecFactory: UpgradeCodecFactory = new UpgradeCodecFactory {
+  def upgradeCodecFactory(channel: Channel): UpgradeCodecFactory = new UpgradeCodecFactory {
     override def newUpgradeCodec(protocol: CharSequence): UpgradeCodec = {
       if (AsciiString.contentEquals(Http2CodecUtil.HTTP_UPGRADE_PROTOCOL_NAME, protocol)) {
         val initialSettings = Settings.fromParams(params)
-        new Http2ServerUpgradeCodec(new Http2Codec(true /* server */, initializer, initialSettings)) {
+        val logger = new Http2FrameLogger(LogLevel.TRACE, classOf[Http2Codec])
+        val bootstrap = new Http2StreamChannelBootstrap()
+          .option(ChannelOption.ALLOCATOR, channel.alloc())
+          .handler(initializer)
+
+        val codec = new Http2Codec(true /* server */, bootstrap, logger, initialSettings)
+        new Http2ServerUpgradeCodec(codec) {
           override def upgradeTo(ctx: ChannelHandlerContext, upgradeRequest: FullHttpRequest) {
             upgradeCounter.incr()
             // we turn off backpressure because Http2 only works with autoread on for now
@@ -75,7 +94,7 @@ private[http2] class Http2CleartextServerInitializer(
     }
     p.addBefore(HttpCodecName, "priorKnowledgeHandler", new PriorKnowledgeHandler(initializer, params))
     p.addAfter(HttpCodecName, "upgradeHandler",
-      new HttpServerUpgradeHandler(httpCodec, upgradeCodecFactory, maxRequestSize.inBytes.toInt))
+      new HttpServerUpgradeHandler(httpCodec, upgradeCodecFactory(ch), maxRequestSize.inBytes.toInt))
 
     p.addLast(init)
   }

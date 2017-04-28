@@ -7,7 +7,8 @@ import com.twitter.finagle.dispatch.GenSerialClientDispatcher
 import com.twitter.finagle.filter.PayloadSizeFilter
 import com.twitter.finagle.http.codec._
 import com.twitter.finagle.http.filter.{ClientContextFilter, DtabFilter, HttpNackFilter, ServerContextFilter}
-import com.twitter.finagle.http.netty.{BadMessageConverter, Netty3ClientStreamTransport, Netty3ServerStreamTransport}
+import com.twitter.finagle.http.netty.{BadMessageConverter, ClientExceptionMapper, Netty3ClientStreamTransport, Netty3ServerStreamTransport}
+import com.twitter.finagle.netty4.http.exp.HttpCodecName
 import com.twitter.finagle.stats.{NullStatsReceiver, ServerStatsReceiver, StatsReceiver}
 import com.twitter.finagle.tracing.{Flags, SpanId, Trace, TraceId, TraceInitializerFilter}
 import com.twitter.finagle.transport.Transport
@@ -74,13 +75,12 @@ private[http] class SafeHttpServerCodec(
  * which gives the application a handle to the byte stream. If `false`, the
  * entire message content is buffered into a [[com.twitter.io.Buf]].
  */
-case class Http(
+private case class Http(
     _compressionLevel: Int = -1,
     _maxRequestSize: StorageUnit = 5.megabytes,
     _maxResponseSize: StorageUnit = 5.megabytes,
     _decompressionEnabled: Boolean = true,
     _channelBufferUsageTracker: Option[ChannelBufferUsageTracker] = None,
-    _annotateCipherHeader: Option[String] = None,
     _enableTracing: Boolean = false,
     _maxInitialLineLength: StorageUnit = 4096.bytes,
     _maxHeaderSize: StorageUnit = 8192.bytes,
@@ -94,7 +94,6 @@ case class Http(
     _maxResponseSize: StorageUnit,
     _decompressionEnabled: Boolean,
     _channelBufferUsageTracker: Option[ChannelBufferUsageTracker],
-    _annotateCipherHeader: Option[String],
     _enableTracing: Boolean,
     _maxInitialLineLength: StorageUnit,
     _maxHeaderSize: StorageUnit,
@@ -106,7 +105,6 @@ case class Http(
       _maxResponseSize,
       _decompressionEnabled,
       _channelBufferUsageTracker,
-      _annotateCipherHeader,
       _enableTracing,
       _maxInitialLineLength,
       _maxHeaderSize,
@@ -126,7 +124,6 @@ case class Http(
   @deprecated("Use maxRequestSize to enforce buffer footprint limits", "2016-05-10")
   def channelBufferUsageTracker(usageTracker: ChannelBufferUsageTracker) =
     copy(_channelBufferUsageTracker = Some(usageTracker))
-  def annotateCipherHeader(headerName: String) = copy(_annotateCipherHeader = Option(headerName))
   def enableTracing(enable: Boolean) = copy(_enableTracing = enable)
   def maxInitialLineLength(length: StorageUnit) = copy(_maxInitialLineLength = length)
   def maxHeaderSize(size: StorageUnit) = copy(_maxHeaderSize = size)
@@ -141,13 +138,15 @@ case class Http(
           val maxHeaderSizeInBytes = _maxHeaderSize.inBytes.toInt
           val maxChunkSize = 8192
           pipeline.addLast(
-            "httpCodec", new HttpClientCodec(
+            HttpCodecName, new HttpClientCodec(
               maxInitialLineLengthInBytes, maxHeaderSizeInBytes, maxChunkSize))
 
-          if (!_streaming)
+          if (!_streaming) {
             pipeline.addLast(
               "httpDechunker",
               new HttpChunkAggregator(_maxResponseSize.inBytes.toInt))
+            pipeline.addLast("clientExceptionMapper", ClientExceptionMapper)
+          }
 
           if (_decompressionEnabled)
             pipeline.addLast("httpDecompressor", new HttpContentDecompressor)
@@ -211,7 +210,12 @@ case class Http(
           val maxRequestSizeInBytes = _maxRequestSize.inBytes.toInt
           val maxInitialLineLengthInBytes = _maxInitialLineLength.inBytes.toInt
           val maxHeaderSizeInBytes = _maxHeaderSize.inBytes.toInt
-          pipeline.addLast("httpCodec", new SafeHttpServerCodec(maxInitialLineLengthInBytes, maxHeaderSizeInBytes, maxRequestSizeInBytes))
+          val safeCodec = new SafeHttpServerCodec(
+            maxInitialLineLengthInBytes,
+            maxHeaderSizeInBytes,
+            maxRequestSizeInBytes /* maxChunkSize */
+          )
+          pipeline.addLast(HttpCodecName, safeCodec)
 
           if (_compressionLevel > 0) {
             pipeline.addLast("httpCompressor", new HttpContentCompressor(_compressionLevel))
@@ -233,10 +237,6 @@ case class Http(
               "httpDechunker",
               new SafeServerHttpChunkAggregator(maxRequestSizeInBytes))
 
-          _annotateCipherHeader foreach { headerName: String =>
-            pipeline.addLast("annotateCipher", new AnnotateCipher(headerName))
-          }
-
           pipeline
         }
       }
@@ -254,7 +254,7 @@ case class Http(
         params: Stack.Params
       ): ServiceFactory[Request, Response] = {
         val finagle.param.Stats(stats) = params[finagle.param.Stats]
-        new HttpNackFilter(stats)
+        HttpNackFilter.newFilter(stats)
           .andThen(new DtabFilter.Extractor)
           .andThen(new ServerContextFilter[Request, Response])
           .andThenIf(!_streaming -> new PayloadSizeFilter[Request, Response](
@@ -272,7 +272,7 @@ case class Http(
   override val protocolLibraryName: String = "http"
 }
 
-object Http {
+private object Http {
   def get() = new Http()
 }
 

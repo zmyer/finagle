@@ -11,10 +11,6 @@ import com.twitter.logging.Logger
 import com.twitter.util.{Future, Promise, Return, Throw}
 
 private[http] object HttpClientDispatcher {
-  val RetryableNackFailure = Failure.rejected("The request was nacked by the server")
-
-  val NonRetryableNackFailure =
-    Failure("The request was nacked by the server and should not be retried", Failure.Rejected|Failure.NonRetryable)
 
   private val log = Logger(getClass.getName)
 
@@ -70,7 +66,7 @@ private[finagle] class HttpClientDispatcher(
 
   protected def dispatch(req: Request, p: Promise[Response]): Future[Unit] = {
     if (!req.isChunked && !req.headerMap.contains(Fields.ContentLength)) {
-      val len = req.getContent().readableBytes
+      val len = req.content.length
       // Only set the content length if we are sure there is content. This
       // behavior complies with the specification that user agents should not
       // set the content length header for messages without a payload body.
@@ -83,11 +79,11 @@ private[finagle] class HttpClientDispatcher(
       // Drain the Transport into Response body.
       trans.read().flatMap {
         case Multi(res, readFinished) if HttpNackFilter.isRetryableNack(res) =>
-          p.updateIfEmpty(Throw(RetryableNackFailure))
+          p.updateIfEmpty(Throw(Failure.RetryableNackFailure))
           swallowNackBody(res).before(readFinished)
 
         case Multi(res, readFinished) if HttpNackFilter.isNonRetryableNack(res) =>
-          p.updateIfEmpty(Throw(NonRetryableNackFailure))
+          p.updateIfEmpty(Throw(Failure.NonRetryableNackFailure))
           swallowNackBody(res).before(readFinished)
 
         case Multi(res, readFinished) =>

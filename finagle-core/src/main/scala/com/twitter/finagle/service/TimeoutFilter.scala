@@ -5,6 +5,7 @@ import com.twitter.finagle._
 import com.twitter.finagle.client.LatencyCompensation
 import com.twitter.finagle.context.{Contexts, Deadline}
 import com.twitter.finagle.tracing.Trace
+import com.twitter.util.tunable.Tunable
 import com.twitter.util.{Duration, Future, Timer}
 
 object TimeoutFilter {
@@ -24,13 +25,37 @@ object TimeoutFilter {
    * A class eligible for configuring a [[com.twitter.finagle.Stackable]]
    * [[com.twitter.finagle.service.TimeoutFilter]] module.
    */
-  case class Param(timeout: Duration) {
+ class Param private[twitter](val tunableTimeout: Tunable[Duration]) {
+
+    def this(timeout: Duration) =
+      this(Tunable.const(role.name, timeout))
+
+    def timeout: Duration = tunableTimeout() match {
+      case Some(duration) => duration
+      case None => Param.Default
+    }
+
     def mk(): (Param, Stack.Param[Param]) =
       (this, Param.param)
   }
+
   object Param {
+    def apply(timeout: Duration): Param =
+      new Param(timeout)
+
+    def apply(tunableTimeout: Tunable[Duration]): Param =
+      new Param(tunableTimeout)
+
+    def unapply(param: Param): Option[Duration] = param.tunableTimeout()
+
+    private[twitter] val Default = Duration.Top
+
     implicit val param: Stack.Param[TimeoutFilter.Param] =
-      Stack.Param(Param(Duration.Top))
+      new Stack.Param[Param] {
+        val default = Param(Default)
+        override def show(p: Param): Seq[(String, () => String)] =
+          Seq(("timeout", () => p.timeout.toString))
+      }
   }
 
   /**
@@ -38,13 +63,63 @@ object TimeoutFilter {
    * [[com.twitter.finagle.service.TimeoutFilter]] module when used for
    * a total timeout of a logical request, including retries.
    */
-  private[finagle] case class TotalTimeout(timeout: Duration) {
+  private[finagle] class TotalTimeout private[twitter](val tunableTimeout: Tunable[Duration]) {
+
+    def this(timeout: Duration) =
+      this(Tunable.const(role.name, timeout))
+
+    def timeout: Duration = tunableTimeout() match {
+      case Some(duration) => duration
+      case None => Param.Default
+    }
+
     def mk(): (TotalTimeout, Stack.Param[Param]) =
       (this, Param.param)
   }
+
   private[finagle] object TotalTimeout {
+    def apply(timeout: Duration): TotalTimeout =
+      new TotalTimeout(timeout)
+
+    private[finagle] val Default = Duration.Top
+
     implicit val param: Stack.Param[TotalTimeout] =
-      Stack.Param(TotalTimeout(Duration.Top))
+      Stack.Param(TotalTimeout(Default))
+  }
+
+  /**
+   * Used for adding, or not, a `TimeoutFilter` for `Stack.Module.make`.
+   */
+  private[finagle] def make[Req, Rep](
+    tunable: Tunable[Duration],
+    defaultTimeout: Duration,
+    compensation: Duration,
+    exceptionFn: Duration => RequestTimeoutException,
+    timer: Timer,
+    next: ServiceFactory[Req, Rep]
+  ): ServiceFactory[Req, Rep] = {
+    def hasNoTimeout(duration: Duration, compensation: Duration): Boolean = {
+      val total = duration + compensation
+      !total.isFinite || total <= Duration.Zero
+    }
+
+    tunable match {
+      case Tunable.Const(duration) if hasNoTimeout(duration, compensation) =>
+        next
+      case _ =>
+        val timeoutFn: () => Duration = () => {
+          val tunableTimeout = tunable() match {
+            case Some(duration) => duration
+            case None => defaultTimeout
+          }
+          compensation + tunableTimeout
+        }
+        new TimeoutFilter[Req, Rep](
+          timeoutFn,
+          exceptionFn,
+          timer
+        ).andThen(next)
+    }
   }
 
   /**
@@ -62,23 +137,18 @@ object TimeoutFilter {
         "Apply a timeout-derived deadline to requests; adjust existing deadlines."
 
       def make(
-        _param: Param,
-        _timer: param.Timer,
-        _compensation: LatencyCompensation.Compensation,
+        param: Param,
+        timerParam: com.twitter.finagle.param.Timer,
+        compensation: LatencyCompensation.Compensation,
         next: ServiceFactory[Req, Rep]
-      ): ServiceFactory[Req, Rep] = {
-        val timeout = _param.timeout + _compensation.howlong
-
-        if (!timeout.isFinite || timeout <= Duration.Zero) {
-          next
-        } else {
-          val filter = new TimeoutFilter[Req, Rep](
-            () => timeout,
-            timeout => new IndividualRequestTimeoutException(timeout),
-            _timer.timer)
-          filter.andThen(next)
-        }
-      }
+      ): ServiceFactory[Req, Rep] =
+        TimeoutFilter.make(
+          param.tunableTimeout,
+          TimeoutFilter.Param.Default,
+          compensation.howlong,
+          timeout => new IndividualRequestTimeoutException(timeout),
+          timerParam.timer,
+          next)
     }
 
   /**
@@ -94,28 +164,50 @@ object TimeoutFilter {
       val description: String =
         "Apply a timeout-derived deadline to requests; adjust existing deadlines."
       def make(
-        _param: Param,
-        _timer: param.Timer,
+        param: Param,
+        timerParam: com.twitter.finagle.param.Timer,
         next: ServiceFactory[Req, Rep]
-      ): ServiceFactory[Req, Rep] = {
-        val Param(timeout) = _param
-        val param.Timer(timer) = _timer
-        if (!timeout.isFinite || timeout <= Duration.Zero) next else {
-          val exc = new IndividualRequestTimeoutException(timeout)
-          val filter = new TimeoutFilter[Req, Rep](timeout, exc, timer)
-          filter.andThen(next)
-        }
-      }
+      ): ServiceFactory[Req, Rep] =
+        TimeoutFilter.make(
+          param.tunableTimeout,
+          TimeoutFilter.Param.Default,
+          Duration.Zero,
+          timeout => new IndividualRequestTimeoutException(timeout),
+          timerParam.timer,
+          next)
     }
 
   def typeAgnostic(
     timeout: Duration,
     exception: RequestTimeoutException,
     timer: Timer
-  ): TypeAgnostic = new TypeAgnostic {
-    override def toFilter[Req, Rep]: Filter[Req, Rep, Req, Rep] =
-      new TimeoutFilter[Req, Rep](timeout, exception, timer)
+  ): TypeAgnostic =
+    typeAgnostic(() => timeout, _ => exception, timer)
+
+  private[twitter] def typeAgnostic(
+    timeoutTunable: Tunable[Duration],
+    exceptionFn: Duration => RequestTimeoutException,
+    timer: Timer
+  ): TypeAgnostic = {
+    val timeoutFn: () => Duration = () => timeoutTunable() match {
+      case Some(duration) => duration
+      case None => TimeoutFilter.Param.Default
+    }
+    typeAgnostic(timeoutFn, exceptionFn, timer)
   }
+
+  private[twitter] def typeAgnostic(
+    timeoutFn: () => Duration,
+    exceptionFn: Duration => RequestTimeoutException,
+    timer: Timer
+  ): TypeAgnostic = new TypeAgnostic {
+    def toFilter[Req, Rep]: Filter[Req, Rep, Req, Rep] =
+      new TimeoutFilter[Req, Rep](
+        timeoutFn,
+        exceptionFn,
+        timer)
+  }
+
 }
 
 /**

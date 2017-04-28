@@ -1,22 +1,17 @@
 package com.twitter.finagle.memcached.integration
 
 import com.twitter.conversions.time._
-import com.twitter.finagle.memcached.util.AtomicMap
 import com.twitter.finagle._
-import com.twitter.finagle.builder.ClientBuilder
+import com.twitter.finagle.liveness.FailureAccrualFactory
 import com.twitter.finagle.memcached.protocol.ClientError
-import com.twitter.finagle.memcached.{Client, Entry, Interpreter, InterpreterService, KetamaClientBuilder, PartitionedClient}
-import com.twitter.finagle.service.FailureAccrualFactory
+import com.twitter.finagle.memcached.{Client, PartitionedClient}
 import com.twitter.finagle.stats.InMemoryStatsReceiver
 import com.twitter.io.Buf
 import com.twitter.util._
 import com.twitter.util.registry.GlobalRegistry
 import java.net.{InetAddress, InetSocketAddress}
-import org.junit.runner.RunWith
 import org.scalatest.{BeforeAndAfter, FunSuite, Outcome}
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class MemcachedTest extends FunSuite with BeforeAndAfter {
 
   val NumServers = 5
@@ -26,44 +21,6 @@ class MemcachedTest extends FunSuite with BeforeAndAfter {
   var client: Client = null
 
   val TimeOut = 15.seconds
-
-  test("Clients and servers on different netty versions") {
-    val concurrencyLevel = 16
-    val slots = 500000
-    val slotsPerLru = slots / concurrencyLevel
-    val maps = (0 until concurrencyLevel).map { i =>
-      new SynchronizedLruMap[Buf, Entry](slotsPerLru)
-    }
-
-    val service = {
-      val interpreter = new Interpreter(new AtomicMap(maps))
-      new InterpreterService(interpreter)
-    }
-
-    val server = Memcached.server
-    val client = Memcached.client
-
-    val servers = Seq(
-      server.configured(Memcached.param.MemcachedImpl.Netty3),
-      server.configured(Memcached.param.MemcachedImpl.Netty4)
-    )
-
-    val clients = Seq(
-      client.configured(Memcached.param.MemcachedImpl.Netty3),
-      client.configured(Memcached.param.MemcachedImpl.Netty4)
-    )
-
-    for (server <- servers; client <- clients) {
-      val srv = server.serve(new InetSocketAddress(InetAddress.getLoopbackAddress, 0), service)
-      val clnt = client.newRichClient(
-        Name.bound(Address(srv.boundAddress.asInstanceOf[InetSocketAddress])), "client")
-
-      Await.result(clnt.delete("foo"), 5.seconds)
-      assert(Await.result(clnt.get("foo"), 5.seconds) == None)
-      Await.result(clnt.set("foo", Buf.Utf8("bar")), 5.seconds)
-      assert(Await.result(clnt.get("foo"), 5.seconds).get == Buf.Utf8("bar"), 5.seconds)
-    }
-  }
 
   private val clientName = "test_client"
   before {
@@ -244,21 +201,23 @@ class MemcachedTest extends FunSuite with BeforeAndAfter {
       }
     ), TimeOut)
 
-    // shutdown one memcache host
-    servers(0).stop()
+    // We can't control the Distributor to make sure that for the set of servers, there is at least
+    // one client in the partition talking to it. Therefore, we rely on the fact that for 5
+    // backends, it's very unlikely all clients will be talking to the same server, and as such,
+    // shutting down all backends but one will trigger cache misses.
+    servers.tail.foreach(_.stop)
 
     // trigger ejection
     for (i <- 0 to 20) {
       Await.ready(client.get(s"foo$i"), TimeOut)
     }
 
-    // other hosts alive
     val clientSet =
       (0 to 20).foldLeft(Set[Client]()){ case (s, i) =>
         val c = partitionedClient.clientOf(s"foo$i")
         s + c
       }
-    assert(clientSet.size == NumServers - 1)
+    assert(clientSet.size == 1)
 
     // previously set values have cache misses
     var cacheMisses = 0
@@ -272,23 +231,6 @@ class MemcachedTest extends FunSuite with BeforeAndAfter {
     val expectedKey = Seq("client", "memcached", clientName, "is_pipelining")
     val isPipelining = GlobalRegistry.get.iterator.exists { e =>
       e.key == expectedKey && e.value == "true"
-    }
-    assert(isPipelining)
-  }
-
-  test("GlobalRegistry non-pipelined client") {
-    val name = "not-pipelined"
-    val expectedKey = Seq("client", "memcached", name, "is_pipelining")
-    KetamaClientBuilder()
-      .clientBuilder(ClientBuilder()
-        .hosts(Seq(servers(0).address))
-        .name(name)
-        .codec(new com.twitter.finagle.memcached.protocol.text.Memcached())
-        .hostConnectionLimit(1))
-      .build()
-
-    val isPipelining = GlobalRegistry.get.iterator.exists { e =>
-      e.key == expectedKey && e.value == "false"
     }
     assert(isPipelining)
   }
@@ -351,7 +293,7 @@ class MemcachedTest extends FunSuite with BeforeAndAfter {
 
     val sr = new InMemoryStatsReceiver
     val myClient = Memcached.client
-      .withLoadBalancer.connectionsPerEndpoint(NumConnections)
+      .connectionsPerEndpoint(NumConnections)
       .withStatsReceiver(sr)
       .newRichClient(Name.Bound.singleton(mutableAddrs), "test_client")
 
@@ -397,7 +339,7 @@ class MemcachedTest extends FunSuite with BeforeAndAfter {
   test("FailureAccrualFactoryException has remote address") {
 
     val client = Memcached.client
-      .withLoadBalancer.connectionsPerEndpoint(1)
+      .connectionsPerEndpoint(1)
       // 1 failure triggers FA; make sure FA stays in "dead" state after failure
       .configured(FailureAccrualFactory.Param(1, 10.minutes))
       .withEjectFailedHost(false)

@@ -37,16 +37,24 @@ private[loadbalancer] trait Balancer[Req, Rep] extends ServiceFactory[Req, Rep] 
   /**
    * The type of Node. Mixed in.
    */
-  protected type Node <: AnyRef with NodeT[Req, Rep] { type This = Node }
+  protected type Node <: AnyRef with NodeT[Req, Rep]
 
   /**
-   * Create a new node representing the given factory, with the given
-   * weight. Report node-related stats to the given StatsReceiver.
+   * Create a new node representing the given factory.
+   * Report node-related stats to the given StatsReceiver.
    */
   protected def newNode(
     factory: ServiceFactory[Req, Rep],
     statsReceiver: StatsReceiver
   ): Node
+
+  /**
+   * Allows implementations to transform the underlying [[ServiceFactory]]
+   * without having to implement a [[Node]].
+   */
+  protected def newFactory(
+    factory: ServiceFactory[Req, Rep]
+  ): ServiceFactory[Req, Rep] = factory
 
   /**
    * Create a node whose sole purpose it is to endlessly fail
@@ -104,7 +112,7 @@ private[loadbalancer] trait Balancer[Req, Rep] extends ServiceFactory[Req, Rep] 
 
   protected sealed trait Update
   protected case class NewList(
-    svcFactories: Traversable[ServiceFactory[Req, Rep]]) extends Update
+    svcFactories: IndexedSeq[ServiceFactory[Req, Rep]]) extends Update
   protected case class Rebuild(cur: Distributor) extends Update
   protected case class Invoke(fn: Distributor => Unit) extends Update
 
@@ -160,7 +168,9 @@ private[loadbalancer] trait Balancer[Req, Rep] extends ServiceFactory[Req, Rep] 
         // factories - old factories, and rebuild the distributor with new
         // factories, preserving the nodes of the factories in the intersection.
 
-        // We will rebuild `Distributor` with these nodes.
+        // We will rebuild `Distributor` with these nodes. Note, it's important
+        // that we maintain the order of the `newFactories` collection as some
+        // `Distributor` implementations rely on its ordering.
         val transferred: immutable.VectorBuilder[Node] = new immutable.VectorBuilder[Node]
 
         // These nodes are currently maintained by `Distributor`.
@@ -169,12 +179,13 @@ private[loadbalancer] trait Balancer[Req, Rep] extends ServiceFactory[Req, Rep] 
 
         var numAdded: Int = 0
 
-        for (newFactory <- newFactories) {
-          if (oldFactories.contains(newFactory)) {
-            transferred += oldFactories(newFactory)
-            oldFactories.remove(newFactory)
+        for (factory <- newFactories) {
+          if (oldFactories.contains(factory)) {
+            transferred += oldFactories(factory)
+            oldFactories.remove(factory)
           } else {
-            transferred += newNode(newFactory, statsReceiver.scope(newFactory.toString))
+            val fact = newFactory(factory)
+            transferred += newNode(fact, statsReceiver.scope(fact.toString))
             numAdded += 1
           }
         }
@@ -204,7 +215,7 @@ private[loadbalancer] trait Balancer[Req, Rep] extends ServiceFactory[Req, Rep] 
    * may run asynchronously, is completed, the load balancer balances
    * across these factories and no others.
    */
-  def update(factories: Traversable[ServiceFactory[Req, Rep]]): Unit = {
+  def update(factories: IndexedSeq[ServiceFactory[Req, Rep]]): Unit = {
     updates.incr()
     updater(NewList(factories))
   }

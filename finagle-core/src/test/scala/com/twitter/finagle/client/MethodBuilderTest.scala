@@ -3,9 +3,10 @@ package com.twitter.finagle.client
 import com.twitter.conversions.time._
 import com.twitter.finagle.Stack.{NoOpModule, Params}
 import com.twitter.finagle._
-import com.twitter.finagle.service.{ReqRep, ResponseClass, Retries, RetryBudget, TimeoutFilter}
+import com.twitter.finagle.service._
 import com.twitter.finagle.stats.InMemoryStatsReceiver
 import com.twitter.util._
+import com.twitter.util.registry.{Entry, GlobalRegistry, SimpleRegistry}
 import java.util.concurrent.atomic.AtomicInteger
 import org.junit.runner.RunWith
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
@@ -24,7 +25,7 @@ private object MethodBuilderTest {
     totalModule.toStack(Stack.Leaf(Stack.Role("test"), svcFactory))
   }
 
-  val perReqTimeoutStack: Stack[ServiceFactory[Int, Int]] = {
+  val stack: Stack[ServiceFactory[Int, Int]] = {
     val svcFactory = ServiceFactory.const(neverSvc)
     TimeoutFilter.clientModule[Int, Int]
       .toStack(Stack.Leaf(Stack.Role("test"), svcFactory))
@@ -226,4 +227,169 @@ class MethodBuilderTest
       }
     }
   }
+
+  test("newService's are added to the Registry") {
+    val registry = new SimpleRegistry()
+    GlobalRegistry.withRegistry(registry) {
+      val protocolLib = "test_lib"
+      val clientName = "some_svc"
+      val addr = "test_addr"
+      val stats = new InMemoryStatsReceiver()
+      val params =
+        Stack.Params.empty +
+          param.Stats(stats) +
+          param.Label(clientName) +
+          param.ProtocolLibrary(protocolLib)
+      val stackClient = TestStackClient(stack, params)
+      val methodBuilder = MethodBuilder.from(addr, stackClient)
+
+      def key(name: String, suffix: String*): Seq[String] =
+        Seq("client", protocolLib, clientName, addr, "methods", name) ++ suffix
+
+      def filteredRegistry: Set[Entry] =
+        registry.filter { entry =>
+          entry.key.head == "client"
+        }.toSet
+
+      // test a "vanilla" one
+      val vanillaSvc = methodBuilder.newService("vanilla")
+      val vanillaEntries = Set(
+        Entry(key("vanilla", "statsReceiver"), s"InMemoryStatsReceiver/$clientName/vanilla"),
+        Entry(key("vanilla", "retry"), "Config(DefaultResponseClassifier)")
+      )
+      assert(filteredRegistry == vanillaEntries)
+
+      // test with retries disabled and timeouts
+      val sundaeSvc = methodBuilder
+        .withTimeout.total(10.seconds)
+        .withTimeout.perRequest(1.second)
+        .withRetry.disabled
+        .newService("sundae")
+      val sundaeEntries = Set(
+        Entry(key("sundae", "statsReceiver"), s"InMemoryStatsReceiver/$clientName/sundae"),
+        Entry(key("sundae", "retry"), "Config(Disabled)"),
+        Entry(key("sundae", "timeout", "total"), "10.seconds"),
+        Entry(key("sundae", "timeout", "per_request"), "1.seconds")
+      )
+      filteredRegistry should contain theSameElementsAs (vanillaEntries ++ sundaeEntries)
+
+      val vanillaClose = vanillaSvc.close()
+      assert(!vanillaClose.isDefined)
+      filteredRegistry should contain theSameElementsAs sundaeEntries
+
+      Await.ready(sundaeSvc.close(), 5.seconds)
+      assert(vanillaClose.isDefined)
+      assert(Set.empty == filteredRegistry)
+    }
+  }
+
+  test("stats are filtered") {
+    val stats = new InMemoryStatsReceiver()
+    val clientLabel = "the_client"
+    val params =
+      Stack.Params.empty +
+        param.Label(clientLabel) +
+        param.Stats(stats)
+
+    val failure = Failure("some reason", new RuntimeException("welp"))
+      .withSource(Failure.Source.Service, "test_service")
+    val svc: Service[Int, Int] = new FailedService(failure)
+
+    val stack = Stack.Leaf(Stack.Role("test"), ServiceFactory.const(svc))
+    val stackClient = TestStackClient(stack, params)
+
+    val methodBuilder = MethodBuilder.from("destination", stackClient)
+
+    // the first attempts will hit the per-request timeout and will be
+    // retried. then the retry should succeed.
+    val methodName = "a_method"
+    val client = methodBuilder.newService(methodName)
+
+    // issue a failing request
+    intercept[Failure] {
+      Await.result(client(1), 5.seconds)
+    }
+
+    // verify the metrics are getting filtered down
+    assert(!stats.gauges.contains(Seq(clientLabel, methodName, "logical", "pending")))
+
+    val failureCounters = stats.counters.exists { case (names, _) =>
+      names.containsSlice(Seq(clientLabel, methodName, "logical", "failures")) ||
+        names.containsSlice(Seq(clientLabel, methodName, "logical", "sourcedfailures"))
+    }
+    assert(!failureCounters)
+  }
+
+  test("underlying service is reference counted") {
+    val svc: Service[Int, Int] = new Service[Int, Int] {
+      private[this] var closed = false
+      def apply(req: Int): Future[Int] = ???
+      override def close(deadline: Time): Future[Unit] = {
+        closed = true
+        Future.Done
+      }
+      override def status: Status =
+        if (closed) Status.Closed else Status.Open
+    }
+    val svcFac: ServiceFactory[Int, Int] = new ServiceFactory[Int, Int] {
+      def apply(conn: ClientConnection): Future[Service[Int, Int]] =
+        Future.value(svc)
+      def close(deadline: Time): Future[Unit] =
+        svc.close(deadline)
+    }
+    val stk = Stack.Leaf(Stack.Role("test"), svcFac)
+    val stackClient = TestStackClient(stk, Stack.Params.empty)
+    val methodBuilder = MethodBuilder.from("refcounts", stackClient)
+
+    val m1 = methodBuilder.newService("method1")
+    val m2 = methodBuilder.newService("method2")
+    assert(m1.isAvailable)
+    assert(m2.isAvailable)
+    assert(svc.isAvailable)
+
+    // closing 1 method should not touch the other
+    val m1Close = m1.close()
+    assert(!m1Close.isDefined)
+    assert(!m1.isAvailable)
+    intercept[ServiceClosedException] { Await.result(m1(1), 5.seconds) }
+    assert(m2.isAvailable)
+    assert(svc.isAvailable)
+
+    // validate that a second close of the same method does nothing
+    assert(!m1Close.isDefined)
+    assert(!m1.isAvailable)
+    assert(m2.isAvailable)
+    assert(svc.isAvailable)
+
+    // validate that closing the last method closes the underlying service.
+    Await.ready(m2.close(), 5.seconds)
+    assert(m1Close.isDefined)
+    assert(!m1.isAvailable)
+    assert(!m2.isAvailable)
+    intercept[ServiceClosedException] { Await.result(m2(1), 5.seconds) }
+    assert(!svc.isAvailable)
+  }
+
+  test("failures are annotated with the method name") {
+    val params = Stack.Params.empty
+
+    val failure = Failure("some reason", new RuntimeException("welp"))
+    val svc: Service[Int, Int] = new FailedService(failure)
+
+    val stack = Stack.Leaf(Stack.Role("test"), ServiceFactory.const(svc))
+    val stackClient = TestStackClient(stack, params)
+
+    val methodBuilder = MethodBuilder.from("destination", stackClient)
+
+    val methodName = "a_method"
+    val client = methodBuilder.newService(methodName)
+
+    // issue a failing request
+    val f = intercept[Failure] {
+      Await.result(client(1), 5.seconds)
+    }
+
+    assert(f.getSource(Failure.Source.Method).contains(methodName))
+  }
+
 }

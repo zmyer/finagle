@@ -3,6 +3,7 @@ package com.twitter.finagle.netty4.transport
 import com.twitter.concurrent.AsyncQueue
 import com.twitter.conversions.time._
 import com.twitter.finagle._
+import com.twitter.finagle.transport.Transport
 import com.twitter.util.{Await, Future, Return, Throw}
 import io.netty.channel.{ChannelException => _, _}
 import io.netty.channel.embedded.EmbeddedChannel
@@ -25,7 +26,7 @@ class ChannelTransportTest extends FunSuite
 
   val (transport, channel) = {
     val ch = new EmbeddedChannel()
-    val tr = new ChannelTransport[String, String](ch)
+    val tr = Transport.cast[String, String](new ChannelTransport(ch))
     (tr, ch)
   }
 
@@ -145,7 +146,7 @@ class ChannelTransportTest extends FunSuite
     when(engine.getSession).thenReturn(session)
     when(session.getPeerCertificates).thenReturn(Array(cert))
     val ch = new EmbeddedChannel(new SslHandler(engine))
-    val tr = new ChannelTransport[String, String](ch)
+    val tr = Transport.cast[String, String](new ChannelTransport(ch))
 
     assert(tr.peerCertificate == Some(cert))
   }
@@ -154,7 +155,7 @@ class ChannelTransportTest extends FunSuite
     val channel = spy(new EmbeddedChannel())
     channel.config().setAutoRead(false)
 
-    val trans = new ChannelTransport[String, String](channel)
+    val trans = Transport.cast[String, String](new ChannelTransport(channel))
 
     // buffer data in the underlying channel
     channel.writeInbound("one")
@@ -183,7 +184,7 @@ class ChannelTransportTest extends FunSuite
     val channel = spy(new EmbeddedChannel())
     channel.config().setAutoRead(false)
 
-    val trans = new ChannelTransport[String, String](channel)
+    val trans = Transport.cast[String, String](new ChannelTransport(channel))
 
     // On startup, the ChannelTransport should queue one read
     channel.pipeline().fireChannelActive()
@@ -203,7 +204,7 @@ class ChannelTransportTest extends FunSuite
     val channel = spy(new EmbeddedChannel())
     channel.config().setAutoRead(false)
 
-    val trans = new ChannelTransport[String, String](channel)
+    val trans = Transport.cast[String, String](new ChannelTransport(channel))
 
     verify(channel, never).read()
     // buffer data in the underlying channel
@@ -229,45 +230,10 @@ class ChannelTransportTest extends FunSuite
     assert("three" == Await.result(readThree, timeout))
   }
 
-  test("replacePending fn sees and transforms pending messages on session close") {
-    val seen = collection.mutable.ListBuffer.empty[String]
-    val em = new EmbeddedChannel
-    val ct = new ChannelTransport[String, String](em, replacePending = { m => seen.append(m); m.reverse})
-
-    em.writeInbound("one")
-    em.writeInbound("two")
-    em.writeInbound("three")
-
-    Await.ready(ct.close(), 1.second)
-    assert(seen.toList == List("one", "two", "three"))
-
-
-    assert(Await.result(ct.read(), 1.second) == "one".reverse)
-    assert(Await.result(ct.read(), 1.second) == "two".reverse)
-    assert(Await.result(ct.read(), 1.second) == "three".reverse)
-  }
-
-  test("releaseMessage fn sees failed offers") {
-    var failedMsgSeen: String = null
-    val em = new EmbeddedChannel
-    val q = new AsyncQueue[String](maxPendingOffers = 1)
-    val ct = new ChannelTransport[String, String](em, releaseMessage = failedMsgSeen = _) {
-      override val queue = q
-    }
-
-    assert(q.offer("full")) // backing async queue is now full
-
-    em.writeInbound("doomed")
-
-    assert(failedMsgSeen == "doomed")
-
-    // channel transport is consequently failed
-    assert(ct.status == Status.Closed)
-  }
 
   test("buffered messages are not flushed on transport shutdown") {
     val em = new EmbeddedChannel
-    val ct = new ChannelTransport[String, String](em)
+    val ct = Transport.cast[String, String](new ChannelTransport(em))
     em.writeInbound("one")
     Await.ready(ct.close())
     assert(Await.result(ct.read(), 1.second) == "one")
@@ -275,7 +241,7 @@ class ChannelTransportTest extends FunSuite
 
   test("buffered messages are not flushed on exceptions") {
     val em = new EmbeddedChannel
-    val ct = new ChannelTransport[String, String](em)
+    val ct = Transport.cast[String, String](new ChannelTransport(em))
     // buffer a message
     em.writeInbound("one")
 
@@ -288,9 +254,36 @@ class ChannelTransportTest extends FunSuite
 
   test("pending transport reads are failed on channel close") {
     val em = new EmbeddedChannel
-    val ct = new ChannelTransport[String, String](em)
+    val ct = Transport.cast[String, String](new ChannelTransport(em))
     val read = ct.read()
     Await.ready(ct.close(), 1.second)
     intercept[ChannelClosedException] { Await.result(read, 1.second) }
+  }
+
+  test("disabling autoread midstream is safe") {
+    val em = new EmbeddedChannel
+    em.config.setAutoRead(true)
+    val ct = new ChannelTransport(em)
+    val transport = Transport.cast[String, String](ct)
+    val f = ct.read()
+    em.config.setAutoRead(false)
+
+    em.writeInbound("one")
+
+    assert(ct.ReadManager.getMsgsNeeded == 0)
+  }
+
+  test("offer failures fail the transport") {
+    val em = new EmbeddedChannel
+    val ct = new ChannelTransport(em, new AsyncQueue[Any](maxPendingOffers = 1))
+    val transport = Transport.cast[String, String](ct)
+
+    // full read queue
+    em.writeInbound("full")
+
+    // rejected
+    em.writeInbound("doomed")
+
+    assert(ct.status == Status.Closed)
   }
 }

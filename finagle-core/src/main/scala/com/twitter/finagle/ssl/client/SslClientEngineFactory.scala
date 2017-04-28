@@ -1,6 +1,6 @@
 package com.twitter.finagle.ssl.client
 
-import com.twitter.finagle.Address
+import com.twitter.finagle.{Address, Stack}
 import com.twitter.finagle.ssl._
 import java.net.InetSocketAddress
 import javax.net.ssl.SSLContext
@@ -9,7 +9,7 @@ import javax.net.ssl.SSLContext
  * Instances of this class provide a method to create Finagle
  * [[Engine Engines]] for use with TLS.
  */
-private[finagle] abstract class SslClientEngineFactory {
+abstract class SslClientEngineFactory {
 
   /**
    * Creates a new [[Engine]] based on an [[Address]]
@@ -24,7 +24,25 @@ private[finagle] abstract class SslClientEngineFactory {
   def apply(address: Address, config: SslClientConfiguration): Engine
 }
 
-private[finagle] object SslClientEngineFactory {
+object SslClientEngineFactory {
+
+  /**
+   * $param the client engine factory used for creating an [[Engine]]
+   * which is used with an SSL/TLS connection.
+   *
+   * @param factory The [[SslClientEngineFactory]] to use for creating
+   * an [[Engine]] based off of an [[Address]] and an [[SslClientConfiguration]].
+   *
+   * @note By default a [[JdkClientEngineFactory]] will be used if this
+   * param is not configured.
+   */
+  case class Param(factory: SslClientEngineFactory) {
+    def mk(): (Param, Stack.Param[Param]) =
+      (this, Param.param)
+  }
+  object Param {
+    implicit val param = Stack.Param(Param(JdkClientEngineFactory))
+  }
 
   /**
    * Configure the supplied [[Engine Engine's]] client mode,

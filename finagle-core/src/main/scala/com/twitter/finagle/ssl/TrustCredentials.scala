@@ -5,10 +5,12 @@ import java.io.File
 /**
  * TrustCredentials represent the items necessary for this configured
  * TLS [[Engine]] to verify a remote peer's credentials.
+ *
+ * @note Java users: See [[TrustCredentialsConfig]].
  */
-private[finagle] sealed trait TrustCredentials
+sealed trait TrustCredentials
 
-private[finagle] object TrustCredentials {
+object TrustCredentials {
 
   /**
    * Indicates that the trust credentials to use with a particular

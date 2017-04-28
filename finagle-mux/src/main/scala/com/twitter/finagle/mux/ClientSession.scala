@@ -1,6 +1,7 @@
 package com.twitter.finagle.mux
 
 import com.twitter.conversions.time._
+import com.twitter.finagle.liveness.FailureDetector
 import com.twitter.finagle.mux.transport.Message
 import com.twitter.finagle.stats.StatsReceiver
 import com.twitter.finagle.transport.Transport
@@ -182,7 +183,7 @@ private[twitter] class ClientSession(
     val readStamp = lock.readLock()
     try state match {
       case Dispatching | Leasing(_) => processAndWrite(msg)
-      case Draining | Drained => FutureNackException
+      case Draining | Drained => Failure.FutureRetryableNackFailure
     } finally lock.unlockRead(readStamp)
   }
 
@@ -232,9 +233,6 @@ private[twitter] class ClientSession(
 }
 
 private object ClientSession {
-  val FutureNackException: Future[Nothing] = Future.exception(
-    Failure.rejected("The request was Nacked by the server"))
-
   val FuturePingNack: Future[Nothing] = Future.exception(Failure(
     "A ping is already outstanding on this session."))
 

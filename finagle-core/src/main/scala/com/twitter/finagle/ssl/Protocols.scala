@@ -3,10 +3,12 @@ package com.twitter.finagle.ssl
 /**
  * Protocols represent the versions of the TLS protocol which should
  * be enabled with a given TLS [[Engine]].
+ *
+ * @note Java users: See [[ProtocolsConfig]].
  */
-private[finagle] sealed trait Protocols
+sealed trait Protocols
 
-private[finagle] object Protocols {
+object Protocols {
 
   /**
    * Indicates that the determination for which TLS protocols are supported

@@ -1,16 +1,16 @@
 package com.twitter.finagle.http2.transport
 
-import com.twitter.cache.FutureCache
 import com.twitter.finagle.client.Transporter
 import com.twitter.finagle.http2.Http2Transporter
 import com.twitter.finagle.http2.transport.Http2ClientDowngrader.StreamMessage
 import com.twitter.finagle.param.Stats
-import com.twitter.finagle.Stack
+import com.twitter.finagle.{Stack, Status}
 import com.twitter.finagle.transport.Transport
 import com.twitter.logging.Logger
-import com.twitter.util.{Future, ConstFuture}
+import com.twitter.util.{Future, ConstFuture, Promise, Time}
 import java.net.SocketAddress
-import java.util.concurrent.ConcurrentHashMap
+import java.security.cert.Certificate
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * This `Transporter` makes `Transports` that speak netty http/1.1, but writes
@@ -24,22 +24,25 @@ import java.util.concurrent.ConcurrentHashMap
 private[http2] class PriorKnowledgeTransporter(
     underlying: Transporter[Any, Any],
     params: Stack.Params)
-  extends Transporter[Any, Any] {
+  extends Transporter[Any, Any] { self =>
 
   private[this] val log = Logger.get()
   private[this] val Stats(statsReceiver) = params[Stats]
   private[this] val upgradeCounter = statsReceiver.scope("upgrade").counter("success")
 
-  private[this] val cache = new ConcurrentHashMap[SocketAddress, Future[MultiplexedTransporter]]()
+  def remoteAddress: SocketAddress = underlying.remoteAddress
 
-  private[this] val fn: SocketAddress => Future[MultiplexedTransporter] = { addr: SocketAddress =>
-    underlying(addr).map { transport =>
+  private[this] val ref = new AtomicReference[Future[MultiplexedTransporter]](null)
+
+  private[this] def createMultiplexedTransporter(): Future[MultiplexedTransporter] = {
+    underlying().map { transport =>
       val multi = new MultiplexedTransporter(
         Transport.cast[StreamMessage, StreamMessage](transport),
-        addr
+        remoteAddress,
+        params
       )
       transport.onClose.ensure {
-        cache.remove(addr)
+        ref.set(null)
       }
 
       // Consider the creation of a new prior knowledge transport as an upgrade
@@ -48,17 +51,38 @@ private[http2] class PriorKnowledgeTransporter(
     }
   }
 
-  private[this] val cachedFn = FutureCache.fromMap(fn, cache)
+  private[this] def getMulti(): Future[MultiplexedTransporter] = {
+    Option(ref.get) match {
+      case None =>
+        val p = Promise[MultiplexedTransporter]()
+        if (ref.compareAndSet(null, p)) {
+          p.become(createMultiplexedTransporter())
+          p
+        } else getMulti()
+      case Some(f) => f
+    }
+  }
 
-  def apply(addr: SocketAddress): Future[Transport[Any, Any]] = cachedFn(addr).flatMap { multi =>
-    new ConstFuture(multi().map(Http2Transporter.unsafeCast)).rescue { case exn: Throwable =>
+  private[this] def deadTransport(exn: Throwable) = new Transport[Any, Any] {
+    def read(): Future[Any] = Future.never
+    def write(msg: Any): Future[Unit] = Future.never
+    val status: Status = Status.Closed
+    def onClose: Future[Throwable] = Future.value(exn)
+    def remoteAddress: SocketAddress = self.remoteAddress
+    def localAddress: SocketAddress = new SocketAddress {}
+    def peerCertificate: Option[Certificate] = None
+    def close(deadline: Time): Future[Unit] = Future.Done
+  }
+
+  def apply(): Future[Transport[Any, Any]] = getMulti().flatMap { multi =>
+    new ConstFuture(multi().map(Http2Transporter.unsafeCast).handle { case exn: Throwable =>
       log.warning(
         exn,
-        s"A previously successful connection to address $addr stopped being successful."
+        s"A previously successful connection to address $remoteAddress stopped being successful."
       )
 
-      cache.remove(addr)
-      apply(addr)
-    }
+      ref.set(null)
+      deadTransport(exn)
+    })
   }
 }

@@ -4,7 +4,7 @@ import com.twitter.concurrent.{Broker, Offer}
 import com.twitter.conversions.time._
 import com.twitter.finagle._
 import com.twitter.finagle.builder._
-import com.twitter.finagle.kestrel.protocol.{Response, Command, Kestrel => KestrelCodec}
+import com.twitter.finagle.kestrel.protocol.{Response, Command}
 import com.twitter.finagle.stats.{Gauge, NullStatsReceiver, StatsReceiver}
 import com.twitter.finagle.thrift.{ClientId, ThriftClientRequest}
 import com.twitter.finagle.util.DefaultLogger
@@ -205,7 +205,7 @@ object MultiReaderMemcache {
    * Create a new MultiReader which dispatches requests to `dest` using the memcache protocol.
    *
    * @param dest the name of the destination which requests are dispatched to.
-   *             See [[http://twitter.github.io/finagle/guide/Names.html Names]] for more detail.
+   *             See [[https://twitter.github.io/finagle/guide/Names.html Names]] for more detail.
    * @param queueName the name of the queue to read from
    *
    * TODO: `dest` is eagerly resolved at client creation time, so name resolution does not
@@ -227,14 +227,6 @@ object MultiReaderMemcache {
     val config = MultiReaderConfig[Command, Response](va, queueName)
     new MultiReaderBuilderMemcache(config)
   }
-
-  /**
-   * Helper for getting the right codec for the memcache protocol
-   *
-   * @return the Kestrel codec
-   */
-  @deprecated("Use `.stack(Kestrel.client)` on the configured com.twitter.finagle.builder.ClientBuilder instead", "2016-12-6")
-  def codec = KestrelCodec()
 }
 
 /**
@@ -273,7 +265,7 @@ object MultiReaderThriftMux {
    * Create a new MultiReader which dispatches requests to `dest` using the thriftmux protocol.
    *
    * @param dest the name of the destination which requests are dispatched to.
-   *             See [[http://twitter.github.io/finagle/guide/Names.html Names]] for more detail.
+   *             See [[https://twitter.github.io/finagle/guide/Names.html Names]] for more detail.
    * @param queueName the name of the queue to read from
    * @param clientId the clientid to be used
    */
@@ -344,7 +336,7 @@ object MultiReaderThrift {
    * Create a new MultiReader which dispatches requests to `dest` using the thrift protocol.
    *
    * @param dest the name of the destination which requests are dispatched to.
-   *             See [[http://twitter.github.io/finagle/guide/Names.html Names]] for more detail.
+   *             See [[https://twitter.github.io/finagle/guide/Names.html Names]] for more detail.
    * @param queueName the name of the queue to read from
    * @param clientId the clientid to be used
    *

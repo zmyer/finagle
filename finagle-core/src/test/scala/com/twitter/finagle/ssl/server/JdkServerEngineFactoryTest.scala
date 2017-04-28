@@ -91,7 +91,7 @@ class JdkServerEngineFactoryTest extends FunSuite {
     val config = SslServerConfiguration(trustCredentials = trustCredentials)
 
     intercept[SslConfigurationException] {
-      val enagine = JdkServerEngineFactory(config)
+      val engine = JdkServerEngineFactory(config)
     }
   }
 

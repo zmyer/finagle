@@ -1,20 +1,17 @@
 package com.twitter.finagle.memcached
 
 import _root_.java.lang.{Boolean => JBoolean, Long => JLong}
-import _root_.java.net.{InetSocketAddress, SocketAddress}
 import _root_.java.nio.charset.StandardCharsets
 import com.twitter.bijection.Bijection
 import com.twitter.concurrent.Broker
-import com.twitter.conversions.time._
 import com.twitter.finagle
 import com.twitter.finagle._
-import com.twitter.finagle.builder.{ClientBuilder, ClientConfig, Cluster}
+import com.twitter.finagle.builder.{ClientBuilder, ClientConfig}
 import com.twitter.finagle.client.Transporter
-import com.twitter.finagle.memcached.exp.LocalMemcached
-import com.twitter.finagle.memcached.protocol.{text, _}
+import com.twitter.finagle.liveness.{FailureAccrualFactory, FailureAccrualPolicy}
+import com.twitter.finagle.memcached.protocol._
 import com.twitter.finagle.memcached.util.Bufs.{RichBuf, nonEmptyStringToBuf, seqOfNonEmptyStringToBuf}
-import com.twitter.finagle.service.exp.FailureAccrualPolicy
-import com.twitter.finagle.service.{FailedService, FailureAccrualFactory, ReqRep, ResponseClassifier}
+import com.twitter.finagle.service._
 import com.twitter.finagle.stats.{NullStatsReceiver, StatsReceiver}
 import com.twitter.hashing._
 import com.twitter.io.Buf
@@ -24,31 +21,6 @@ import scala.collection.breakOut
 import scala.collection.{immutable, mutable}
 
 object Client {
-  /**
-   * Construct a client from a single host.
-   *
-   * @param host a String of host:port combination.
-   */
-  @deprecated(message = "Use `com.twitter.finagle.Memcached.client`", since = "2016-12-22")
-  def apply(host: String): Client = Client(
-    ClientBuilder()
-      .hosts(host)
-      .hostConnectionLimit(1)
-      .codec(text.Memcached())
-      .daemon(true)
-      .build())
-
-  /**
-   * Construct a client from a Name
-   */
-  @deprecated(message = "Use `com.twitter.finagle.Memcached.client`", since = "2016-12-22")
-  def apply(name: Name): Client = Client(
-    ClientBuilder()
-      .dest(name)
-      .hostConnectionLimit(1)
-      .codec(new text.Memcached)
-      .daemon(true)
-      .build())
 
   /**
    * Construct a client from a single Service.
@@ -845,20 +817,6 @@ trait PartitionedClient extends Client {
     throw new UnsupportedOperationException("No logical way to perform stats without a key")
 }
 
-object PartitionedClient {
-  @deprecated("Use CacheNodeGroup.apply(hostPartWeights) instead", "7.0.0")
-  def parseHostPortWeights(hostPortWeights: String): Seq[(String, Int, Int)] =
-    hostPortWeights
-      .split(Array(' ', ','))
-      .filter(_ != "")
-      .map(_.split(":"))
-      .map {
-        case Array(host)               => (host, 11211, 1)
-        case Array(host, port)         => (host, port.toInt, 1)
-        case Array(host, port, weight) => (host, port.toInt, weight.toInt)
-      }
-}
-
 abstract class KetamaClientKey {
   def identifier: String
 }
@@ -1246,151 +1204,6 @@ object KetamaClient {
   val DefaultNumReps = KetamaPartitionedClient.DefaultNumReps
 }
 
-@deprecated(message = "Use the `com.twitter.finagle.Memcached builder", since = "2015-02-22")
-case class KetamaClientBuilder private[memcached](
-  _name: Name,
-  _hashName: Option[String],
-  _clientBuilder: Option[ClientBuilder[_, _, _, _, ClientConfig.Yes]],
-  _failureAccrualParams: (Int, () => Duration) = (5, () => 30.seconds),
-  _ejectFailedHost: Boolean = true,
-  oldLibMemcachedVersionComplianceMode: Boolean = false,
-  numReps: Int = KetamaPartitionedClient.DefaultNumReps
-) {
-  import Memcached.Client.mkDestination
-
-  private lazy val localMemcachedName = Resolver.eval("localhost:" + LocalMemcached.port)
-
-  private def withLocalMemcached =
-    copy(_name = localMemcachedName)
-
-  def dest(
-    name: Name,
-    useOnlyResolvedAddress: Boolean = false
-  ): KetamaClientBuilder = {
-    val va = if (LocalMemcached.enabled) {
-      localMemcachedName
-    } else {
-      name
-    }
-    copy(_name = va)
-  }
-
-  def dest(name: String): KetamaClientBuilder =
-    if (LocalMemcached.enabled) {
-      withLocalMemcached
-    } else dest(Resolver.eval(name))
-
-  @deprecated("Use `KetamaClientBuilder.dest(name: Name)` instead", "7.0.0")
-  def group(group: Group[CacheNode]): KetamaClientBuilder = {
-    if (LocalMemcached.enabled) {
-      withLocalMemcached
-    } else {
-      // Must use `set` method on Group so we get updates
-      val va: Var[Addr] = group.set.map(_.map(CacheNode.toAddress)).map(Addr.Bound(_))
-      copy(_name = Name.Bound.singleton(va))
-    }
-  }
-
-  @deprecated("Use `KetamaClientBuilder.dest(name: Name)` instead", "7.0.0")
-  def cachePoolCluster(cluster: Cluster[CacheNode]): KetamaClientBuilder = {
-    if (LocalMemcached.enabled) {
-      withLocalMemcached
-    } else {
-      group(Group.fromCluster(cluster))
-    }
-  }
-
-  def nodes(nodes: Seq[(String, Int, Int)]): KetamaClientBuilder = {
-    if (LocalMemcached.enabled) {
-      withLocalMemcached
-    } else {
-      val addrs: Seq[Address.Inet] = nodes.map {
-        case (host, port, weight) =>
-          val metadata = CacheNodeMetadata.toAddrMetadata(CacheNodeMetadata(weight, None))
-          Address.Inet(new InetSocketAddress(host, port), metadata)
-      }
-      copy(_name = Name.bound(addrs:_*))
-    }
-  }
-
-  def nodes(hostPortWeights: String): KetamaClientBuilder =
-    group(CacheNodeGroup(hostPortWeights))
-
-  def hashName(hashName: String): KetamaClientBuilder =
-    copy(_hashName = Some(hashName))
-
-  def numReps(numReps: Int): KetamaClientBuilder =
-    copy(numReps = numReps)
-
-  def clientBuilder(clientBuilder: ClientBuilder[_, _, _, _, ClientConfig.Yes]): KetamaClientBuilder =
-    copy(_clientBuilder = Some(clientBuilder))
-
-  def failureAccrualParams(numFailures: Int, markDeadFor: Duration): KetamaClientBuilder =
-    copy(_failureAccrualParams = (numFailures, () => markDeadFor))
-
-  def failureAccrualParams(numFailures: Int, markDeadFor: () => Duration): KetamaClientBuilder =
-    copy(_failureAccrualParams = (numFailures, markDeadFor))
-
-  def noFailureAccrual: KetamaClientBuilder =
-    copy(_failureAccrualParams = (Int.MaxValue, () => Duration.Zero))
-
-  def enableOldLibMemcachedVersionComplianceMode(): KetamaClientBuilder =
-    copy(oldLibMemcachedVersionComplianceMode = true)
-
-  def ejectFailedHost(eject: Boolean): KetamaClientBuilder =
-    copy(_ejectFailedHost = eject)
-
-  def build(): Client = {
-    val stackBasedClient =
-      (_clientBuilder getOrElse ClientBuilder().hostConnectionLimit(1).daemon(true))
-        .codec(text.Memcached())
-        .underlying
-
-    val keyHasher = KeyHasher.byName(_hashName.getOrElse("ketama"))
-
-    val (numFailures, markDeadFor) = _failureAccrualParams
-
-    val label = stackBasedClient.params[finagle.param.Label].label
-    val stats = stackBasedClient.params[finagle.param.Stats]
-      .statsReceiver.scope(label).scope("memcached_client")
-
-    val healthBroker = new Broker[NodeHealth]
-
-    Memcached.registerClient(label, keyHasher.toString, isPipelining = false)
-
-    val va = _name match {
-      case Name.Bound(va) => va
-      case n =>
-        throw new IllegalArgumentException(s"Memcached client only supports Bound Names, was: $n")
-    }
-
-    def newService(node: CacheNode) = stackBasedClient
-      .configured(Memcached.param.EjectFailedHost(_ejectFailedHost))
-      .configured(FailureAccrualFactory.Param(numFailures, markDeadFor))
-      .configured(FactoryToService.Enabled(true))
-      .transformed(new Stack.Transformer {
-        val key = KetamaClientKey.fromCacheNode(node)
-        def apply[Cmd, Rep](stk: Stack[ServiceFactory[Cmd, Rep]]) =
-          stk.replace(FailureAccrualFactory.role,
-            KetamaFailureAccrualFactory.module[Cmd, Rep](key, healthBroker))
-      }).newClient(mkDestination(node.host, node.port)).toService
-
-    new KetamaPartitionedClient(
-      va,
-      newService,
-      healthBroker,
-      stats,
-      keyHasher,
-      numReps,
-      oldLibMemcachedVersionComplianceMode)
-  }
-}
-
-object KetamaClientBuilder {
-  def apply(): KetamaClientBuilder = KetamaClientBuilder(Name.empty, Some("ketama"), None)
-  def get(): KetamaClientBuilder = apply()
-}
-
 /**
  * Ruby memcache-client (MemCache) compatible client.
  */
@@ -1434,7 +1247,7 @@ case class RubyMemCacheClientBuilder(
     val builder = _clientBuilder getOrElse ClientBuilder().hostConnectionLimit(1).daemon(true)
     val clients = _nodes.map { case (hostname, port, weight) =>
       require(weight == 1, "Ruby memcache node weight must be 1")
-      Client(builder.hosts(hostname + ":" + port).codec(text.Memcached()).build())
+      Client(Memcached.client.newService(hostname + ":" + port))
     }
     new RubyMemCacheClient(clients)
   }
@@ -1483,7 +1296,7 @@ case class PHPMemCacheClientBuilder(
     val builder = _clientBuilder getOrElse ClientBuilder().hostConnectionLimit(1).daemon(true)
     val keyHasher = KeyHasher.byName(_hashName.getOrElse("crc32-itu"))
     val clients = _nodes.flatMap { case (hostname, port, weight) =>
-      val client = Client(builder.hosts(hostname + ":" + port).codec(text.Memcached()).build())
+      val client = Client(Memcached.client.newService(hostname + ":" + port))
       for (i <- (1 to weight)) yield client
     }.toArray
     new PHPMemCacheClient(clients, keyHasher)

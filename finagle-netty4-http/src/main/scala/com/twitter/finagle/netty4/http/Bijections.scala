@@ -1,6 +1,6 @@
 package com.twitter.finagle.netty4.http
 
-import com.twitter.finagle.http.HeaderMap
+import com.twitter.finagle.http.{Fields, HeaderMap}
 import com.twitter.finagle.netty4.{ByteBufAsBuf, BufAsByteBuf}
 import com.twitter.finagle.{http => FinagleHttp}
 import com.twitter.io.{BufReader, Reader}
@@ -110,7 +110,10 @@ private[finagle] object Bijections {
         map.underlying
 
       case _ =>
-        val result = new NettyHttp.DefaultHttpHeaders()
+        // We don't want to validate headers here since they are already validated
+        // by Netty 3 DefaultHttpHeaders. This not only allows us to be efficient
+        // but also preserves the behavior of Netty 3.
+        val result = new NettyHttp.DefaultHttpHeaders(false/*validate headers*/)
         h.foreach { case (k,v) =>
           result.add(k, v)
         }
@@ -123,6 +126,7 @@ private[finagle] object Bijections {
     def versionToNetty(v: FinagleHttp.Version): NettyHttp.HttpVersion = v match {
       case FinagleHttp.Version.Http10 => NettyHttp.HttpVersion.HTTP_1_0
       case FinagleHttp.Version.Http11 => NettyHttp.HttpVersion.HTTP_1_1
+      case _ => NettyHttp.HttpVersion.HTTP_1_1
     }
 
     def responseHeadersToNetty(r: FinagleHttp.Response): NettyHttp.HttpResponse =
@@ -152,7 +156,13 @@ private[finagle] object Bijections {
           r.uri,
           headersToNetty(r.headerMap)
         )
-        NettyHttp.HttpUtil.setTransferEncodingChunked(result, true)
+        // We only set the Transfer-Encoding to "chunked" if the request does not have
+        // Content-Length set. This mimics Netty 3 behavior, wherein a request can be "chunked"
+        // and not have a "Transfer-Encoding: chunked" header (instead, it has a Content-Length).
+        if (!r.headerMap.contains(Fields.ContentLength)) {
+          result.headers.add(
+            NettyHttp.HttpHeaderNames.TRANSFER_ENCODING, NettyHttp.HttpHeaderValues.CHUNKED)
+        }
         result
       }
       else {

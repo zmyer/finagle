@@ -1,50 +1,14 @@
 package com.twitter.finagle.client
 
-import com.twitter.finagle.{Filter, Stack, param}
-import com.twitter.finagle.service.RequeueFilter
-import com.twitter.finagle.service._
-import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.finagle.{Filter, param}
+import com.twitter.finagle.service.{RequeueFilter, _}
+import com.twitter.finagle.stats.{BlacklistStatsReceiver, ExceptionStatsHandler, StatsReceiver}
 import com.twitter.util.{Throw, Try}
 
 /**
  * '''Experimental:''' This API is under construction.
  *
- * Retries are intended to help clients improve success rate by trying
- * failed requests additional times. Care must be taken by developers
- * to only retry when they are known to be safe to issue the request multiple
- * times. This is because the client cannot always be sure what the
- * backend service has done. An example of a request that is safe to
- * retry would be a read-only request.
- *
- * Defaults to using the client's [[ResponseClassifier]] to retry failures
- * [[com.twitter.finagle.service.ResponseClass.RetryableFailure marked as retryable]].
- * See [[forClassifier]] for details.
- *
- * A [[RetryBudget]] is used to prevent retries from overwhelming
- * the backend service. The budget is shared across clients created from
- * an initial [[MethodBuilder]]. As such, even if the retry rules
- * deem the request retryable, it may not be retried if there is insufficient
- * budget.
- *
- * Finagle will automatically retry failures that are known to be safe
- * to retry via [[RequeueFilter]]. This includes
- * [[com.twitter.finagle.WriteException WriteExceptions]] and
- * [[com.twitter.finagle.Failure.Restartable retryable nacks]]. As these should have
- * already been retried, we avoid retrying them again by ignoring them at this layer.
- *
- * Additional information regarding retries can be found in the
- * [[https://twitter.github.io/finagle/guide/Clients.html#retries user guide]].
- *
- * @note Retries can be disabled using [[RetryPolicy.none]]:
- * {{{
- * import com.twitter.finagle.client.MethodBuilder
- * import com.twitter.finagle.service.RetryPolicy
- *
- * val methodBuilder: MethodBuilder[Int, Int] = ???
- * methodBuilder.withRetry.forPolicy(RetryPolicy.none)
- * }}}
- *
- * @see [[MethodBuilder.withRetry]]
+ * @see [[MethodBuilderScaladoc]]
  */
 private[finagle] class MethodBuilderRetry[Req, Rep] private[client] (
     mb: MethodBuilder[Req, Rep]) {
@@ -52,80 +16,61 @@ private[finagle] class MethodBuilderRetry[Req, Rep] private[client] (
   import MethodBuilderRetry._
 
   /**
-   * Retry based on [[ResponseClassifier]].
-   *
-   * The default behavior is to use the client's classifier which is typically
-   * configured through `theClient.withResponseClassifier` or
-   * `ClientBuilder.withResponseClassifier`.
-   *
-   * For example, retrying on `Exception` responses:
-   * {{{
-   * import com.twitter.finagle.client.MethodBuilder
-   * import com.twitter.finagle.service.{ReqRep, ResponseClass}
-   * import com.twitter.util.Throw
-   *
-   * val builder: MethodBuilder[Int, Int] = ???
-   * builder.withRetry.forClassifier {
-   *   case ReqRep(_, Throw(_)) => ResponseClass.RetryableFailure
-   * }
-   * }}}
-   *
-   * @param classifier when a [[ResponseClass.Failed Failed]] with `retryable`
-   *                   is `true` is returned for a given `ReqRep`, the
-   *                   request will be retried.
-   *                   This is often [[ResponseClass.RetryableFailure]].
-   *
-   * @see [[https://twitter.github.io/finagle/guide/Clients.html#response-classification
-   *     response classification user guide]]
+   * @see [[MethodBuilderScaladoc.withRetryForClassifier]]
    */
   def forClassifier(
     classifier: ResponseClassifier
   ): MethodBuilder[Req, Rep] =
-    forPolicy(policyForReqRep(shouldRetry(classifier)))
+    mb.withConfig(mb.config.copy(retry = Config(classifier)))
 
   /**
-   * '''Expert API:''' For most users, the default policy which uses
-   * the client's [[ResponseClassifier]] is appropriate.
-   *
-   * Retry based on a [[RetryPolicy]].
-   *
-   * @note Retries can be disabled using [[RetryPolicy.none]]:
-   * {{{
-   * import com.twitter.finagle.client.MethodBuilder
-   * import com.twitter.finagle.service.RetryPolicy
-   *
-   * val methodBuilder: MethodBuilder[Int, Int] = ???
-   * methodBuilder.withRetry.forPolicy(RetryPolicy.none)
-   * }}}
-   *
-   * @see [[forClassifier]]
+   * @see [[MethodBuilderScaladoc.withRetryDisabled]]
    */
-  def forPolicy(
-    retryPolicy: RetryPolicy[(Req, Try[Rep])]
-  ): MethodBuilder[Req, Rep] = {
-    val withoutRequeues = filteredPolicy(retryPolicy)
-    val retries = mb.config.retry.copy(retryPolicy = withoutRequeues)
-    mb.withConfig(mb.config.copy(retry = retries))
-  }
+  def disabled: MethodBuilder[Req, Rep] =
+    forClassifier(Disabled)
 
   private[client] def filter(
     scopedStats: StatsReceiver
-  ): Filter[Req, Rep, Req, Rep] = {
-    val config = mb.config.retry
-    if (!isDefined(config.retryPolicy))
-      Filter.identity[Req, Rep]
-    else
-      new RetryFilter[Req, Rep](
-        config.retryPolicy,
-        mb.params[param.HighResTimer].timer,
-        scopedStats,
-        mb.params[Retries.Budget].retryBudget)
+  ): Filter.TypeAgnostic = {
+    val classifier = mb.config.retry.responseClassifier
+    if (classifier eq Disabled)
+      Filter.TypeAgnostic.Identity
+    else {
+      new Filter.TypeAgnostic {
+        def toFilter[Req1, Rep1]: Filter[Req1, Rep1, Req1, Rep1] = {
+          val retryPolicy = policyForReqRep(shouldRetry[Req1, Rep1](classifier))
+          val withoutRequeues = filteredPolicy(retryPolicy)
+
+          new RetryFilter[Req1, Rep1](
+            withoutRequeues,
+            mb.params[param.HighResTimer].timer,
+            scopedStats,
+            mb.params[Retries.Budget].retryBudget)
+        }
+      }
+    }
+  }
+
+  private[client] def logicalStatsFilter(stats: StatsReceiver): Filter.TypeAgnostic =
+    StatsFilter.typeAgnostic(
+      new BlacklistStatsReceiver(stats.scope(LogicalScope), LogicalStatsBlacklistFn),
+      mb.config.retry.responseClassifier,
+      ExceptionStatsHandler.Null,
+      mb.params[StatsFilter.Param].unit)
+
+  private[client] def registryEntries: Iterable[(Seq[String], String)] = {
+    Seq(
+      (Seq("retry"), mb.config.retry.toString)
+    )
   }
 
 }
 
 private[client] object MethodBuilderRetry {
   val MaxRetries = 2
+
+  private val Disabled: ResponseClassifier =
+    ResponseClassifier.named("Disabled")(PartialFunction.empty)
 
   private def shouldRetry[Req, Rep](
     classifier: ResponseClassifier
@@ -163,26 +108,20 @@ private[client] object MethodBuilderRetry {
         case _ => true
       }
 
-  /**
-   * Creates a [[Config]] using the stack's [[ResponseClassifier]]
-   * as the basis for which responses should be retried.
-   *
-   * @see [[MethodBuilderRetry.forClassifier]] for details on how the
-   *     classifier is used.
-   */
-  def newConfig[Req, Rep](params: Stack.Params): Config[Req, Rep] = {
-    val classifier = params[param.ResponseClassifier].responseClassifier
-    val should = shouldRetry(classifier)
-    val policy = filteredPolicy(policyForReqRep(should))
-    Config(policy)
+  /** The stats scope used for logical success rate. */
+  private val LogicalScope = "logical"
+
+  // the `StatsReceiver` used is already scoped to `$clientName/$methodName/logical`.
+  // this omits the pending gauge as well as failures/sourcedfailures details.
+  private val LogicalStatsBlacklistFn: Seq[String] => Boolean = { segments =>
+    val head = segments.head
+    head == "pending" || head == "failures" || head == "sourcedfailures"
   }
 
   /**
-   * See [[newConfig]] for creating new instances.
-   *
-   * @param retryPolicy which request/response pairs should be retried.
+   * @see [[MethodBuilderRetry.forClassifier]] for details on how the
+   *     classifier is used.
    */
-  case class Config[Req, Rep] private (
-      retryPolicy: RetryPolicy[(Req, Try[Rep])])
+  case class Config(responseClassifier: ResponseClassifier)
 
 }

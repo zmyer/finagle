@@ -2,13 +2,20 @@ package com.twitter.finagle.filter
 
 import com.twitter.conversions.time._
 import com.twitter.finagle._
+import com.twitter.finagle.server.ServerInfo
 import com.twitter.finagle.stats.StatsReceiver
 import com.twitter.finagle.util.{Ema, Rng}
 import com.twitter.util._
 
 private[finagle] object NackAdmissionFilter {
   private val OverloadFailure = Future.exception(Failure("Failed fast because service is overloaded", Failure.Rejected|Failure.NonRetryable))
-  private val role = new Stack.Role("NackAdmissionFilter")
+  val role = new Stack.Role("NackAdmissionFilter")
+
+  /**
+   * For feature roll out only.
+   */
+  private val EnableNackAcToggle = CoreToggles("com.twitter.finagle.core.UseClientNackAdmissionFilter")
+  private def enableNackAc(): Boolean = EnableNackAcToggle(ServerInfo().id.hashCode)
 
   /**
    * An upper bound on what percentage of requests this filter will drop.
@@ -75,12 +82,11 @@ private[finagle] object NackAdmissionFilter {
           _param.window, _param.nackRateThreshold, Rng.threadLocal,
           stats.scope("nack_admission_control"))
 
-        // Insert the filter into the client stack. We use `FactoryToService`
-        // and `ServiceFactory.const` to ensure that the filter operates across
-        // all endpoints rather than just per-endpoint.
-        ServiceFactory.const(filter.andThen(new FactoryToService(next)))
+        // This creates a filter that is shared across all endpoints, which is
+        // required for proper operation.
+        filter.andThen(next)
       }
-    }
+  }
 }
 
 /**
@@ -136,11 +142,14 @@ private[finagle] class NackAdmissionFilter[Req, Rep](
   // EMA representing the rate of responses that are not nacks. We update it
   // whenever we get a response from the cluster with 0 when the service responds
   // with a nack and 1 otherwise.
+  // NB: Usage of the ema must be synchronized with the generation of the timestamp.
+  //     and neither the Ema nor Monotime class is threadsafe.
   private[this] val ema = new Ema(windowInNs)
-  ema.update(monoTime.nanos(), 1) // Start the ema at 1.0
+  // Start the ema at 1.0. No need for synchronization during construction.
+  ema.update(monoTime.nanos(), 1)
 
-  // for testing
-  private[filter] def emaValue: Double = ema.last
+  // visible for testing. Synchronized as Ema is not threadsafe
+  private[filter] def emaValue: Double = synchronized { ema.last }
 
   // Decrease the EMA if the response is a Nack, increase otherwise. Update the
   // acceptFraction & last update time
@@ -149,20 +158,23 @@ private[finagle] class NackAdmissionFilter[Req, Rep](
       case Throw(f: Failure) if f.isFlagged(Failure.Rejected) => 0
       case _ => 1
     }
-    ema.update(monoTime.nanos(), value)
+
+    // Avoid a race condition where another update occurs between the call to
+    // nanos and the update.
+    synchronized { ema.update(monoTime.nanos(), value) }
   }
 
   // Drop the current request if:
   // 1. The accept fraction is under the threshold
   // 2. A random value is < the calculated drop probability
   private[this] def shouldDropRequest(): Boolean = {
-    val acceptFraction = ema.last
+    val acceptFraction = emaValue
     acceptFraction < acceptRateThreshold &&
       random.nextDouble() < math.min(MaxDropProbability, 1.0 - multiplier * acceptFraction)
   }
 
   def apply(req: Req, service: Service[Req, Rep]): Future[Rep] = {
-    if (shouldDropRequest()) {
+    if (enableNackAc() && shouldDropRequest()) {
       droppedRequestCounter.incr()
       OverloadFailure
     } else {

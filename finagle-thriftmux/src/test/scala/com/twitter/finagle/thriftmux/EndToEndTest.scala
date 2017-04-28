@@ -13,15 +13,15 @@ import com.twitter.finagle.stats.{InMemoryStatsReceiver, NullStatsReceiver}
 import com.twitter.finagle.thrift.{ClientId, Protocols, ThriftClientFramedCodec, ThriftClientRequest}
 import com.twitter.finagle.thriftmux.service.ThriftMuxResponseClassifier
 import com.twitter.finagle.thriftmux.thriftscala._
-import com.twitter.finagle.tracing._
 import com.twitter.finagle.tracing.Annotation.{ClientSend, ServerRecv}
+import com.twitter.finagle.tracing._
 import com.twitter.finagle.transport.Transport
 import com.twitter.finagle.util.HashedWheelTimer
 import com.twitter.io.Buf
 import com.twitter.util._
 import java.net.{InetAddress, InetSocketAddress, SocketAddress}
-import org.apache.thrift.protocol._
 import org.apache.thrift.TApplicationException
+import org.apache.thrift.protocol._
 import org.junit.runner.RunWith
 import org.scalactic.source.Position
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
@@ -41,7 +41,7 @@ class EndToEndTest extends FunSuite
   // turn off failure detector since we don't need it for these tests.
   override def test(testName: String, testTags: Tag*)(f: => Any)(implicit pos: Position): Unit = {
     super.test(testName, testTags:_*) {
-      mux.sessionFailureDetector.let("none") { f }
+      liveness.sessionFailureDetector.let("none") { f }
     }
   }
 
@@ -51,15 +51,15 @@ class EndToEndTest extends FunSuite
   case class TestContext(buf: Buf)
 
   val testContext = new Contexts.broadcast.Key[TestContext]("com.twitter.finagle.mux.MuxContext") {
-    def marshal(tc: TestContext) = tc.buf
-    def tryUnmarshal(buf: Buf) = Return(TestContext(buf))
+    def marshal(tc: TestContext): Buf = tc.buf
+    def tryUnmarshal(buf: Buf): Try[TestContext] = Return(TestContext(buf))
   }
 
   trait ThriftMuxTestServer {
     val server = ThriftMux.server.serveIface(
       new InetSocketAddress(InetAddress.getLoopbackAddress, 0),
       new TestService.FutureIface {
-        def query(x: String) =
+        def query(x: String): Future[String] =
           (Contexts.broadcast.get(testContext), Dtab.local) match {
             case (None, Dtab.empty) =>
               Future.value(x+x)
@@ -118,7 +118,7 @@ class EndToEndTest extends FunSuite
 
     def servers(pf: TProtocolFactory): Seq[(String, Closable, Int)] = {
       val iface = new TestService.FutureIface {
-        def query(x: String) =
+        def query(x: String): Future[String] =
           if (x.isEmpty) Future.value(ClientId.current.map(_.name).getOrElse(""))
           else Future.value(x + x)
       }
@@ -207,7 +207,7 @@ class EndToEndTest extends FunSuite
     val server = ThriftMux.server.serveIface(
       new InetSocketAddress(InetAddress.getLoopbackAddress, 0),
       new TestService.FutureIface {
-        def query(x: String) = throw new Exception("sad panda")
+        def query(x: String): Future[String] = throw new Exception("sad panda")
       })
     val client = Thrift.client.newIface[TestService.FutureIface](
       Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])), "aclient")
@@ -236,7 +236,7 @@ class EndToEndTest extends FunSuite
       .serveIface(
         new InetSocketAddress(InetAddress.getLoopbackAddress, 0),
         new TestService.FutureIface {
-          def query(x: String) = Future.value(x + x)
+          def query(x: String): Future[String] = Future.value(x + x)
         })
 
     val client = Thrift.client
@@ -304,8 +304,7 @@ class EndToEndTest extends FunSuite
       // This request fails and is not requeued because there are
       // no Open service factories in the load balancer.
       try await(client.query("ok")) catch {
-        case _: ChannelClosedException => // ok
-        case _: ChannelWriteException => // ok
+        case Failure(Some(_: ConnectionFailedException)) => // ok
       }
 
       // Subsequent requests are failed fast since there are (still) no
@@ -359,8 +358,13 @@ class EndToEndTest extends FunSuite
 
       assert(await(client.query("ok")) == "okok")
       await(server.close())
-      intercept[ChannelWriteException] {
+      val ex = intercept[Failure] {
         await(client.query("ok"))
+      }
+
+      ex match {
+        case Failure(Some(_: ConnectionFailedException)) => ()
+        case other => fail(s"Expected Failure(Some(ConnectionFailedException)) but found $other")
       }
 
       intercept[FailedFastException] {
@@ -682,7 +686,8 @@ class EndToEndTest extends FunSuite
         new PipeliningDispatcher(transport, NullStatsReceiver, new MockTimer)
     }
 
-    val service = await(OldPlainPipeliningThriftClient.newClient(server)())
+    val service = await(OldPlainPipeliningThriftClient.newClient(
+      Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])), "client")())
     val client = new TestService.FinagledClient(service, Protocols.binaryFactory())
     val reqs = 1 to nreqs map { i => client.query("ok" + i) }
     // Although the requests are pipelined in the client, they must be
@@ -893,10 +898,10 @@ class EndToEndTest extends FunSuite
       Thrift.client.newIface[TestService.FutureIface](Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])), "client")
 
     val f = client.query("ok")
-    intercept[Exception] { await(f) }
+    intercept[Exception] { await(f, 10.milliseconds) }
 
     val close = server.close(1.minute) // up to a minute
-    intercept[Exception] { await(close) }
+    intercept[Exception] { await(close, 10.milliseconds) }
 
     response.setValue("done")
 
@@ -978,9 +983,11 @@ class EndToEndTest extends FunSuite
     }
   }
 
-  test("thriftmux server + thriftmux client: pass mux-supported c.t.f.Failure flags") {
+  test("thriftmux server + thriftmux client: pass mux-supported c.t.f.FailureFlags") {
 
-    var failure: Failure = null
+    import FailureFlags._
+
+    var failure: FailureFlags[_] = null
 
     val server = ThriftMux.server.serveIface(
       new InetSocketAddress(InetAddress.getLoopbackAddress, 0),
@@ -989,10 +996,10 @@ class EndToEndTest extends FunSuite
       }
     )
 
-    // Don't strip failure flags, as we're testing to ensure they traverse
+    // Don't strip failure flags, as we're testing to ensure they traverse. Also, disable retries
     val removeFailure = new Transformer {
       def apply[Req, Rep](stack: Stack[ServiceFactory[Req, Rep]]): Stack[ServiceFactory[Req, Rep]] =
-        stack.remove(Failure.role)
+        stack.remove(Failure.role).remove(Retries.Role)
     }
 
     val client = ThriftMux.client
@@ -1001,19 +1008,26 @@ class EndToEndTest extends FunSuite
         Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])), "client"
       )
 
-    def check(f: Failure) = {
+    def check(f: FailureFlags[_]) = {
       failure = f
       await(client.query(":(").liftToTry) match {
-        case Throw(res: Failure) => assert(res.flags == f.flags)
+        case Throw(res: FailureFlags[_]) => assert(res.flags == f.flags)
         case other => fail(s"Unexpected response: $other")
       }
     }
 
+    class CustomException(val flags: Long) extends FailureFlags[CustomException] {
+      def copyWithFlags(newFlags: Long): CustomException = new CustomException(newFlags)
+    }
+
     val failures = Seq(
-      Failure("Rejected", Failure.Rejected),
-      Failure("Restartable", Failure.Restartable),
-      Failure("NonRetryable", Failure.NonRetryable),
-      Failure.rejected("Rejected/Retryable")
+      Failure("Rejected", Rejected),
+      Failure("Restartable", Retryable),
+      Failure("NonRetryable", NonRetryable),
+      Failure.rejected("Rejected/Retryable"),
+      new CustomException(Rejected),
+      new CustomException(Retryable),
+      new CustomException(NonRetryable)
     )
     failures.foreach(check _)
     await(server.close())
@@ -1099,4 +1113,233 @@ class EndToEndTest extends FunSuite
       await(server.close())
     }
   }
+
+  private def testMethodBuilderTimeouts(
+    stats: InMemoryStatsReceiver,
+    server: ListeningServer,
+    builder: MethodBuilder
+  ): Unit = {
+    // these should never complete within the timeout
+    val shortTimeout: Service[TestService.Query.Args, TestService.Query.SuccessType] =
+      builder.withTimeoutPerRequest(5.millis)
+        .newServiceIface[TestService.ServiceIface]("fast")
+        .query
+
+    intercept[IndividualRequestTimeoutException] {
+      await(shortTimeout(TestService.Query.Args("shorty")))
+    }
+    eventually {
+      assert(stats.counter("a_label", "fast", "logical", "requests")() == 1)
+      assert(stats.counter("a_label", "fast", "logical", "success")() == 0)
+    }
+
+    // these should always complete within the timeout
+    val longTimeout =
+      builder.withTimeoutPerRequest(5.seconds)
+        .newServiceIface[TestService.ServiceIface]("slow")
+        .query
+
+    val result = await(longTimeout(TestService.Query.Args("looong")))
+    assert("looong" == result)
+    eventually {
+      assert(stats.counter("a_label", "slow", "logical", "requests")() == 1)
+      assert(stats.counter("a_label", "slow", "logical", "success")() == 1)
+    }
+    await(server.close())
+  }
+
+  test("methodBuilder timeouts from Stack") {
+    implicit val timer = HashedWheelTimer.Default
+    val service = new TestService.FutureIface {
+      def query(x: String): Future[String] = {
+        Future.sleep(50.millis).before { Future.value(x) }
+      }
+    }
+    val server = ThriftMux.server.serveIface(
+      new InetSocketAddress(InetAddress.getLoopbackAddress, 0), service)
+
+    val stats = new InMemoryStatsReceiver()
+    val client = ThriftMux.client
+      .configured(param.Timer(timer))
+      .withStatsReceiver(stats)
+      .withLabel("a_label")
+    val name = Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress]))
+    val builder: MethodBuilder = client.methodBuilder(name)
+
+    testMethodBuilderTimeouts(stats, server, builder)
+  }
+
+  test("methodBuilder timeouts from ClientBuilder") {
+    implicit val timer = HashedWheelTimer.Default
+    val service = new TestService.FutureIface {
+      def query(x: String): Future[String] = {
+        Future.sleep(50.millis).before { Future.value(x) }
+      }
+    }
+    val server = ThriftMux.server.serveIface(
+      new InetSocketAddress(InetAddress.getLoopbackAddress, 0), service)
+
+    val stats = new InMemoryStatsReceiver()
+    val client = ThriftMux.client
+      .configured(param.Timer(timer))
+
+    val clientBuilder = ClientBuilder()
+      .reportTo(stats)
+      .name("a_label")
+      .stack(client)
+      .dest(Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])))
+    val mb = MethodBuilder.from(clientBuilder)
+
+    testMethodBuilderTimeouts(stats, server, mb)
+  }
+
+  test("methodBuilder timeouts from configured ClientBuilder") {
+    implicit val timer = HashedWheelTimer.Default
+    val service = new TestService.FutureIface {
+      def query(x: String): Future[String] = {
+        Future.sleep(50.millis).before { Future.value(x) }
+      }
+    }
+    val server = ThriftMux.server.serveIface(
+      new InetSocketAddress(InetAddress.getLoopbackAddress, 0), service)
+
+    val stats = new InMemoryStatsReceiver()
+    val client = ThriftMux.client
+      .configured(param.Timer(timer))
+
+    val clientBuilder = ClientBuilder()
+      // set tight "default" timeouts that MB must override in
+      // order to get successful responses.
+      .requestTimeout(5.milliseconds)
+      .timeout(10.milliseconds)
+      .reportTo(stats)
+      .name("a_label")
+      .stack(client)
+      .dest(Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])))
+    val mb = MethodBuilder.from(clientBuilder)
+
+    // these should never complete within the timeout
+    val asIs: Service[TestService.Query.Args, TestService.Query.SuccessType] =
+      mb.newServiceIface[TestService.ServiceIface]("as_is")
+        .query
+    intercept[RequestTimeoutException] {
+      await(asIs(TestService.Query.Args("nope")))
+    }
+    eventually {
+      assert(stats.counter("a_label", "as_is", "logical", "requests")() == 1)
+      assert(stats.counter("a_label", "as_is", "logical", "success")() == 0)
+    }
+
+    // increase the timeouts via MB and now the request should succeed
+    val longTimeout =
+      mb.withTimeoutPerRequest(5.seconds)
+        .withTimeoutTotal(5.seconds)
+        .newServiceIface[TestService.ServiceIface]("good")
+        .query
+
+    val result = await(longTimeout(TestService.Query.Args("yep")))
+    assert("yep" == result)
+    eventually {
+      assert(stats.counter("a_label", "good", "logical", "requests")() == 1)
+      assert(stats.counter("a_label", "good", "logical", "success")() == 1)
+    }
+    await(server.close())
+  }
+
+  private[this] def testMethodBuilderRetries(
+    stats: InMemoryStatsReceiver,
+    server: ListeningServer,
+    builder: MethodBuilder
+  ): Unit = {
+    val retryInvalid = builder
+      .withRetryForClassifier {
+        case ReqRep(_, Throw(InvalidQueryException(_))) =>
+          ResponseClass.RetryableFailure
+      }
+      .newServiceIface[TestService.ServiceIface]("all_invalid")
+      .query
+
+    intercept[InvalidQueryException] {
+      await(retryInvalid(TestService.Query.Args("fail0")))
+    }
+    eventually {
+      assert(stats.counter("a_label", "all_invalid", "logical", "requests")() == 1)
+      assert(stats.counter("a_label", "all_invalid", "logical", "success")() == 0)
+      assert(stats.stat("a_label", "all_invalid", "retries")() == Seq(2))
+    }
+
+    val errCode1Succeeds = builder
+      .withRetryForClassifier {
+        case ReqRep(_,  Throw(InvalidQueryException(errorCode))) if errorCode == 0 =>
+          ResponseClass.NonRetryableFailure
+        case ReqRep(_,  Throw(InvalidQueryException(errorCode))) if errorCode == 1 =>
+          ResponseClass.Success
+      }
+      .newServiceIface[TestService.ServiceIface]("err_1")
+      .query
+
+    intercept[InvalidQueryException] {
+      // this is a non-retryable failure
+      await(errCode1Succeeds(TestService.Query.Args("fail0")))
+    }
+    eventually {
+      assert(stats.counter("a_label", "err_1", "logical", "requests")() == 1)
+      assert(stats.counter("a_label", "err_1", "logical", "success")() == 0)
+      assert(stats.stat("a_label", "err_1", "retries")() == Seq(0))
+    }
+
+    intercept[InvalidQueryException] {
+      // this is a "successful" "failure"
+      await(errCode1Succeeds(TestService.Query.Args("fail1")))
+    }
+    eventually {
+      assert(stats.counter("a_label", "err_1", "logical", "requests")() == 2)
+      assert(stats.counter("a_label", "err_1", "logical", "success")() == 1)
+    }
+    await(server.close())
+  }
+
+  test("methodBuilder retries from Stack") {
+    val service = new TestService.FutureIface {
+      def query(x: String): Future[String] = x match {
+        case "fail0" => Future.exception(InvalidQueryException(0))
+        case "fail1" => Future.exception(InvalidQueryException(1))
+        case _ => Future.value(x)
+      }
+    }
+    val server = ThriftMux.server.serveIface(
+      new InetSocketAddress(InetAddress.getLoopbackAddress, 0), service)
+    val stats = new InMemoryStatsReceiver()
+    val client = ThriftMux.client
+      .withStatsReceiver(stats)
+      .withLabel("a_label")
+    val name = Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress]))
+    val builder: MethodBuilder = client.methodBuilder(name)
+
+    testMethodBuilderRetries(stats, server, builder)
+  }
+
+  test("methodBuilder retries from ClientBuilder") {
+    val service = new TestService.FutureIface {
+      def query(x: String): Future[String] = x match {
+        case "fail0" => Future.exception(InvalidQueryException(0))
+        case "fail1" => Future.exception(InvalidQueryException(1))
+        case _ => Future.value(x)
+      }
+    }
+    val server = ThriftMux.server.serveIface(
+      new InetSocketAddress(InetAddress.getLoopbackAddress, 0), service)
+    val stats = new InMemoryStatsReceiver()
+    val client = ThriftMux.client
+    val clientBuilder = ClientBuilder()
+      .reportTo(stats)
+      .name("a_label")
+      .stack(client)
+      .dest(Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])))
+
+    val builder: MethodBuilder = MethodBuilder.from(clientBuilder)
+
+    testMethodBuilderRetries(stats, server, builder)
+  }
+
 }
