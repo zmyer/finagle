@@ -7,19 +7,21 @@ import com.twitter.finagle.util.Rng
  * A mix-in that defines a [[DistributorT]] which uses [[P2CPick]].
  */
 private[loadbalancer] trait P2C[Req, Rep] { self: Balancer[Req, Rep] =>
+
   /**
    * Our sturdy coin flipper.
    */
   protected def rng: Rng
 
   protected class Distributor(vector: Vector[Node])
-    extends DistributorT[Node](vector)
-    with P2CPick[Node] {
+      extends DistributorT[Node](vector)
+      with P2CPick[Node] {
     type This = Distributor
 
     protected def bound: Int = vector.size
-    protected def emptyNode = failingNode(emptyException)
-    protected def rng = self.rng
+    protected def emptyNode: Node = failingNode(emptyException)
+    protected def rng: Rng = self.rng
+    protected val vec: Vector[Node] = vector
 
     // There is nothing to rebuild (we don't partition in P2C) so we just return
     // `this` instance.

@@ -1,21 +1,28 @@
 package com.twitter.finagle.netty4.param
 
-import com.twitter.finagle.netty4.{LeakDetectingAllocator, usePooling, trackReferenceLeaks}
+import com.twitter.app.GlobalFlag
 import com.twitter.finagle.Stack
 import io.netty.buffer.{ByteBufAllocator, PooledByteBufAllocator, UnpooledByteBufAllocator}
 
-private[netty4] case class Allocator(allocator: ByteBufAllocator)
-private[netty4] object Allocator {
+/**
+ * Flag for configuring the default Netty4 `ByteBufAllocator`
+ *
+ * @note This flag is intended only for testing and emergency purposes. Outside of those
+ *       two use cases it will likely only serve to degrade performance and therefore is
+ *       not a recommended tuning parameter for normal operation.
+ */
+private object useUnpooledByteBufAllocator extends GlobalFlag[Boolean](
+  default = false,
+  help = "Use an unpooled Netty4 ByteBuf allocator as the default allocator " +
+    "instead of the pooled ByteBuf allocator.")
 
-  // nb: we can't use io.netty.buffer.UnpooledByteBufAllocator.DEFAULT
-  //     because we don't prefer direct byte buffers.
-  //
-  // See CSL-3027 for more details.
-  val Unpooled =
-    if (trackReferenceLeaks.enabled) LeakDetectingAllocator
-    else new UnpooledByteBufAllocator(/* preferDirect */ false, /* disableLeakDetector */ true)
+private[finagle] case class Allocator(allocator: ByteBufAllocator)
+private[finagle] object Allocator {
 
-  implicit val allocatorParam: Stack.Param[Allocator] = Stack.Param(Allocator(
-    if (usePooling()) PooledByteBufAllocator.DEFAULT else Unpooled
-  ))
+  private def defaultAllocator: ByteBufAllocator = {
+    if (useUnpooledByteBufAllocator()) new UnpooledByteBufAllocator( /* preferDirect */ false)
+    else PooledByteBufAllocator.DEFAULT
+  }
+
+  implicit val allocatorParam: Stack.Param[Allocator] = Stack.Param(Allocator(defaultAllocator))
 }

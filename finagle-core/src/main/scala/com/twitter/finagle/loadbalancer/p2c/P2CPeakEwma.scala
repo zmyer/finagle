@@ -1,10 +1,16 @@
 package com.twitter.finagle.loadbalancer.p2c
 
-import com.twitter.finagle.loadbalancer.{Balancer, PeakEwma, Updating}
-import com.twitter.util.{Activity, Duration}
+import com.twitter.finagle.loadbalancer.{
+  Balancer,
+  EndpointFactory,
+  FailingEndpointFactory,
+  PeakEwma,
+  Updating
+}
+import com.twitter.finagle.{NoBrokersAvailableException, ServiceFactoryProxy}
+import com.twitter.finagle.stats.{Counter, StatsReceiver}
 import com.twitter.finagle.util.Rng
-import com.twitter.finagle.stats.StatsReceiver
-import com.twitter.finagle.{NoBrokersAvailableException, ServiceFactory}
+import com.twitter.util.{Activity, Duration}
 
 /**
  * Like [[com.twitter.finagle.loadbalancer.p2c.P2CLeastLoaded]] but
@@ -18,10 +24,10 @@ import com.twitter.finagle.{NoBrokersAvailableException, ServiceFactory}
  * @param endpoints An activity that updates with the set of node pairs
  * over which we distribute load.
  *
- * @param decayTime The window of latency observations.
- *
  * @param maxEffort the maximum amount of "effort" we're willing to
  * expend on a load balancing decision without reweighing.
+ *
+ * @param decayTime The window of latency observations.
  *
  * @param rng The PRNG used for flipping coins. Override for
  * deterministic tests.
@@ -33,16 +39,24 @@ import com.twitter.finagle.{NoBrokersAvailableException, ServiceFactory}
  * Randomized Load Balancing. IEEE Trans. Parallel Distrib. Syst. 12,
  * 10 (October 2001), 1094-1104.
  */
-private[loadbalancer] class P2CPeakEwma[Req, Rep](
-    protected val endpoints: Activity[IndexedSeq[ServiceFactory[Req, Rep]]],
-    protected val decayTime: Duration,
-    protected val maxEffort: Int,
-    protected val rng: Rng,
-    protected val statsReceiver: StatsReceiver,
-    protected val emptyException: NoBrokersAvailableException)
-  extends Balancer[Req, Rep]
-  with PeakEwma[Req, Rep]
-  with P2C[Req, Rep]
-  with Updating[Req, Rep] {
-  protected[this] val maxEffortExhausted = statsReceiver.counter("max_effort_exhausted")
+private[loadbalancer] final class P2CPeakEwma[Req, Rep](
+  protected val endpoints: Activity[IndexedSeq[EndpointFactory[Req, Rep]]],
+  protected val decayTime: Duration,
+  protected val nanoTime: () => Long,
+  protected val maxEffort: Int,
+  protected val rng: Rng,
+  protected val statsReceiver: StatsReceiver,
+  protected val emptyException: NoBrokersAvailableException
+) extends Balancer[Req, Rep]
+    with PeakEwma[Req, Rep]
+    with P2C[Req, Rep]
+    with Updating[Req, Rep] {
+  protected[this] val maxEffortExhausted: Counter = statsReceiver.counter("max_effort_exhausted")
+
+  case class Node(factory: EndpointFactory[Req, Rep])
+      extends ServiceFactoryProxy[Req, Rep](factory)
+      with PeakEwmaNode
+
+  protected def newNode(factory: EndpointFactory[Req, Rep]): Node = Node(factory)
+  protected def failingNode(cause: Throwable): Node = Node(new FailingEndpointFactory(cause))
 }

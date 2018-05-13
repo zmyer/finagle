@@ -4,9 +4,9 @@ import com.twitter.util.{Duration, Time, Timer, TimerTask}
 import java.util.concurrent.TimeUnit
 
 /**
- * An implementation of [[Timer]] based on Netty 4 [[io.netty.util.Timer]].
+ * An implementation of Finagle's [[Timer]] based on Netty 4 [[io.netty.util.Timer]].
  */
-private final class Netty4Timer(underlying: io.netty.util.Timer) extends Timer {
+private[netty4] class Netty4Timer(underlying: io.netty.util.Timer) extends Timer {
 
   protected def scheduleOnce(when: Time)(f: => Unit): TimerTask =
     new TimerTask {
@@ -14,7 +14,8 @@ private final class Netty4Timer(underlying: io.netty.util.Timer) extends Timer {
         new io.netty.util.TimerTask {
           def run(timeout: io.netty.util.Timeout): Unit = if (!timeout.isCancelled) { f }
         },
-        math.max(0, (when - Time.now).inMilliseconds), TimeUnit.MILLISECONDS
+        math.max(0, (when - Time.now).inMilliseconds),
+        TimeUnit.MILLISECONDS
       )
 
       def cancel(): Unit = timeout.cancel()
@@ -40,4 +41,6 @@ private final class Netty4Timer(underlying: io.netty.util.Timer) extends Timer {
     }
 
   def stop(): Unit = underlying.stop()
+
+  override def toString: String = "Netty4Timer"
 }

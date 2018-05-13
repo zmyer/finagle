@@ -1,5 +1,6 @@
 package com.twitter.finagle.client
 
+import com.twitter.conversions.percent._
 import com.twitter.conversions.time._
 import com.twitter.finagle.Stack.{NoOpModule, Params}
 import com.twitter.finagle._
@@ -7,34 +8,39 @@ import com.twitter.finagle.service._
 import com.twitter.finagle.stats.InMemoryStatsReceiver
 import com.twitter.util._
 import com.twitter.util.registry.{Entry, GlobalRegistry, SimpleRegistry}
+import com.twitter.util.tunable.Tunable
 import java.util.concurrent.atomic.AtomicInteger
-import org.junit.runner.RunWith
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
-import org.scalatest.junit.JUnitRunner
 import org.scalatest.{FunSuite, Matchers}
+import org.scalatest.mockito.MockitoSugar
 
 private object MethodBuilderTest {
   private val neverSvc: Service[Int, Int] =
-    Service.mk { _ => Future.never }
+    Service.mk { _ =>
+      Future.never
+    }
 
   val totalTimeoutStack: Stack[ServiceFactory[Int, Int]] = {
     val svcFactory = ServiceFactory.const(neverSvc)
     // use a no-op module to verify it will get swapped out
     val totalModule = new NoOpModule[ServiceFactory[Int, Int]](
-      TimeoutFilter.totalTimeoutRole, "testing total timeout")
+      TimeoutFilter.totalTimeoutRole,
+      "testing total timeout"
+    )
     totalModule.toStack(Stack.Leaf(Stack.Role("test"), svcFactory))
   }
 
   val stack: Stack[ServiceFactory[Int, Int]] = {
     val svcFactory = ServiceFactory.const(neverSvc)
-    TimeoutFilter.clientModule[Int, Int]
+    TimeoutFilter
+      .clientModule[Int, Int]
       .toStack(Stack.Leaf(Stack.Role("test"), svcFactory))
   }
 
   case class TestStackClient(
-      override val stack: Stack[ServiceFactory[Int, Int]],
-      override val params: Params)
-    extends StackClient[Int, Int] { self =>
+    override val stack: Stack[ServiceFactory[Int, Int]],
+    override val params: Params
+  ) extends StackClient[Int, Int] { self =>
 
     def withStack(stack: Stack[ServiceFactory[Int, Int]]): StackClient[Int, Int] =
       TestStackClient(stack, self.params)
@@ -50,11 +56,11 @@ private object MethodBuilderTest {
   }
 }
 
-@RunWith(classOf[JUnitRunner])
 class MethodBuilderTest
   extends FunSuite
   with Matchers
   with Eventually
+  with MockitoSugar
   with IntegrationPatience {
 
   import MethodBuilderTest._
@@ -68,9 +74,10 @@ class MethodBuilderTest
     val stackClient = TestStackClient(totalTimeoutStack, params)
     val methodBuilder = MethodBuilder.from("retry_it", stackClient)
 
-    val client = methodBuilder
-      .withTimeout.total(10.milliseconds)
-      .withRetry.forClassifier {
+    val client = methodBuilder.withTimeout
+      .total(10.milliseconds)
+      .withRetry
+      .forClassifier {
         case ReqRep(_, Throw(_: GlobalRequestTimeoutException)) =>
           ResponseClass.RetryableFailure
       }
@@ -99,7 +106,8 @@ class MethodBuilderTest
       Future.sleep(perReqTimeout + 1.millis)(timer).map(_ => i)
     }
 
-    val stack = TimeoutFilter.clientModule[Int, Int]
+    val stack = TimeoutFilter
+      .clientModule[Int, Int]
       .toStack(Stack.Leaf(Stack.Role("test"), ServiceFactory.const(svc)))
     val stackClient = TestStackClient(stack, params)
     val methodBuilder = MethodBuilder.from("together", stackClient)
@@ -107,10 +115,12 @@ class MethodBuilderTest
     // the first 2 attempts will hit the per-request timeout, with each
     // being retried. then the the 3 attempt (2nd retry) should run into
     // the total timeout.
-    val client = methodBuilder
-      .withTimeout.perRequest(perReqTimeout)
-      .withTimeout.total(totalTimeout)
-      .withRetry.forClassifier {
+    val client = methodBuilder.withTimeout
+      .perRequest(perReqTimeout)
+      .withTimeout
+      .total(totalTimeout)
+      .withRetry
+      .forClassifier {
         case ReqRep(_, Throw(_: IndividualRequestTimeoutException)) =>
           ResponseClass.RetryableFailure
       }
@@ -168,7 +178,8 @@ class MethodBuilderTest
         Future.value(i)
     }
 
-    val stack = TimeoutFilter.clientModule[Int, Int]
+    val stack = TimeoutFilter
+      .clientModule[Int, Int]
       .toStack(Stack.Leaf(Stack.Role("test"), ServiceFactory.const(svc)))
     val stackClient = TestStackClient(stack, params)
     val methodBuilder = MethodBuilder.from("destination", stackClient)
@@ -176,9 +187,10 @@ class MethodBuilderTest
     // the first attempts will hit the per-request timeout and will be
     // retried. then the retry should succeed.
     val methodName = "a_method"
-    val client = methodBuilder
-      .withTimeout.perRequest(perReqTimeout)
-      .withRetry.forClassifier {
+    val client = methodBuilder.withTimeout
+      .perRequest(perReqTimeout)
+      .withRetry
+      .forClassifier {
         case ReqRep(_, Throw(_: IndividualRequestTimeoutException)) =>
           ResponseClass.RetryableFailure
       }
@@ -228,6 +240,41 @@ class MethodBuilderTest
     }
   }
 
+  test("newServices with no MethodName are added to the Registry") {
+    val registry = new SimpleRegistry()
+    GlobalRegistry.withRegistry(registry) {
+      val protocolLib = "test_lib"
+      val clientName = "some_svc"
+      val addr = "test_addr"
+      val stats = new InMemoryStatsReceiver()
+      val params =
+        Stack.Params.empty +
+          param.Stats(stats) +
+          param.Label(clientName) +
+          param.ProtocolLibrary(protocolLib)
+      val stackClient = TestStackClient(stack, params)
+      val methodBuilder = MethodBuilder.from(addr, stackClient)
+
+      def key(name: String, suffix: String*): Seq[String] =
+        Seq("client", protocolLib, clientName, addr, "methods", name) ++ suffix
+
+      def filteredRegistry: Set[Entry] =
+        registry.filter { entry =>
+          entry.key.head == "client"
+        }.toSet
+
+      val totalSvc = methodBuilder.newService
+      val totalSvcEntries = Set(
+        Entry(key("statsReceiver"), s"InMemoryStatsReceiver/$clientName"),
+        Entry(key("retry"), "Config(DefaultResponseClassifier)")
+      )
+      assert(filteredRegistry == totalSvcEntries)
+
+      Await.result(totalSvc.close(), 5.seconds)
+      assert(registry.isEmpty)
+    }
+  }
+
   test("newService's are added to the Registry") {
     val registry = new SimpleRegistry()
     GlobalRegistry.withRegistry(registry) {
@@ -260,16 +307,18 @@ class MethodBuilderTest
       assert(filteredRegistry == vanillaEntries)
 
       // test with retries disabled and timeouts
-      val sundaeSvc = methodBuilder
-        .withTimeout.total(10.seconds)
-        .withTimeout.perRequest(1.second)
-        .withRetry.disabled
+      val sundaeSvc = methodBuilder.withTimeout
+        .total(10.seconds)
+        .withTimeout
+        .perRequest(1.second)
+        .withRetry
+        .disabled
         .newService("sundae")
       val sundaeEntries = Set(
         Entry(key("sundae", "statsReceiver"), s"InMemoryStatsReceiver/$clientName/sundae"),
         Entry(key("sundae", "retry"), "Config(Disabled)"),
-        Entry(key("sundae", "timeout", "total"), "10.seconds"),
-        Entry(key("sundae", "timeout", "per_request"), "1.seconds")
+        Entry(key("sundae", "timeout", "total"), "TunableDuration(total,10.seconds,Tunable(com.twitter.util.tunable.NoneTunable))"),
+        Entry(key("sundae", "timeout", "per_request"), "TunableDuration(perRequest,1.seconds,Tunable(com.twitter.util.tunable.NoneTunable))")
       )
       filteredRegistry should contain theSameElementsAs (vanillaEntries ++ sundaeEntries)
 
@@ -283,7 +332,7 @@ class MethodBuilderTest
     }
   }
 
-  test("stats are filtered") {
+  test("stats are filtered with methodName if it exists") {
     val stats = new InMemoryStatsReceiver()
     val clientLabel = "the_client"
     val params =
@@ -310,14 +359,80 @@ class MethodBuilderTest
       Await.result(client(1), 5.seconds)
     }
 
+    eventually {
+      assert(1 == stats.counters(Seq(clientLabel, methodName, "logical", "requests")))
+      assert(1 == stats.counters(Seq(
+        clientLabel,
+        methodName,
+        "logical",
+        "failures",
+        "com.twitter.finagle.Failure",
+        "java.lang.RuntimeException"))
+      )
+    }
+
     // verify the metrics are getting filtered down
     assert(!stats.gauges.contains(Seq(clientLabel, methodName, "logical", "pending")))
-
-    val failureCounters = stats.counters.exists { case (names, _) =>
-      names.containsSlice(Seq(clientLabel, methodName, "logical", "failures")) ||
-        names.containsSlice(Seq(clientLabel, methodName, "logical", "sourcedfailures"))
+    val sourcedFailures = stats.counters.exists {
+      case (names, _) =>
+          names.containsSlice(Seq(clientLabel, methodName, "logical", "sourcedfailures"))
     }
-    assert(!failureCounters)
+    assert(!sourcedFailures)
+    val failures = stats.counters.contains(
+      Seq(clientLabel, methodName, "logical", "failures")
+    )
+    assert(!failures)
+  }
+
+  test("stats are not filtered with methodName if it does not exist") {
+    val stats = new InMemoryStatsReceiver()
+    val clientLabel = "the_client"
+    val params =
+      Stack.Params.empty +
+        param.Label(clientLabel) +
+        param.Stats(stats)
+
+    val failure = Failure("some reason", new RuntimeException("welp"))
+      .withSource(Failure.Source.Service, "test_service")
+    val svc: Service[Int, Int] = new FailedService(failure)
+
+    val stack = Stack.Leaf(Stack.Role("test"), ServiceFactory.const(svc))
+    val stackClient = TestStackClient(stack, params)
+
+    val methodBuilder = MethodBuilder.from("destination", stackClient)
+
+    // the first attempts will hit the per-request timeout and will be
+    // retried. then the retry should succeed.
+    val client = methodBuilder.newService
+
+    // issue a failing request
+    intercept[Failure] {
+      Await.result(client(1), 5.seconds)
+    }
+
+    eventually {
+      assert(1 == stats.counters(Seq(clientLabel, "logical", "requests")))
+      assert(1 == stats.counters(Seq(
+        clientLabel,
+        "logical",
+        "failures",
+        "com.twitter.finagle.Failure",
+        "java.lang.RuntimeException"))
+      )
+    }
+
+    // verify the metrics are getting filtered down
+    assert(!stats.gauges.contains(Seq(clientLabel, "logical", "pending")))
+    assert(!stats.gauges.contains(Seq(clientLabel, "logical", "pending")))
+    val sourcedFailures = stats.counters.exists {
+      case (names, _) =>
+          names.containsSlice(Seq(clientLabel, "logical", "sourcedfailures"))
+    }
+    assert(!sourcedFailures)
+    val failures = stats.counters.contains(
+      Seq(clientLabel, "logical", "failures")
+    )
+    assert(!failures)
   }
 
   test("underlying service is reference counted") {
@@ -370,7 +485,7 @@ class MethodBuilderTest
     assert(!svc.isAvailable)
   }
 
-  test("failures are annotated with the method name") {
+  test("failures are annotated with the method name if it exists") {
     val params = Stack.Params.empty
 
     val failure = Failure("some reason", new RuntimeException("welp"))
@@ -392,4 +507,342 @@ class MethodBuilderTest
     assert(f.getSource(Failure.Source.Method).contains(methodName))
   }
 
+  test("failures are not annotated with the method name if it does not exist") {
+    val params = Stack.Params.empty
+
+    val failure = Failure("some reason", new RuntimeException("welp"))
+    val svc: Service[Int, Int] = new FailedService(failure)
+
+    val stack = Stack.Leaf(Stack.Role("test"), ServiceFactory.const(svc))
+    val stackClient = TestStackClient(stack, params)
+
+    val methodBuilder = MethodBuilder.from("destination", stackClient)
+
+    val methodName = "a_method"
+    val client = methodBuilder.newService
+
+    // issue a failing request
+    val f = intercept[Failure] {
+      Await.result(client(1), 5.seconds)
+    }
+
+    assert(f.getSource(Failure.Source.Method).isEmpty)
+  }
+
+  test("nonIdempotent disables BackupRequestFilter") {
+    val underlying = mock[Service[Int, Int]]
+    val svc = ServiceFactory.const(underlying)
+
+    val configuredBrfParam = BackupRequestFilter.Configured(
+      maxExtraLoad = 1.percent,
+      sendInterrupts = true)
+
+    // Configure BackupRequestFilter
+    val params = Stack.Params.empty + configuredBrfParam
+
+    val stack = Stack.Leaf(Stack.Role("test"), svc)
+
+    val stackClient = TestStackClient(stack, params)
+    val methodBuilder = MethodBuilder.from("with backups", stackClient)
+
+    // Ensure BRF is configured before calling `nonIdempotent`
+    assert(methodBuilder.params[BackupRequestFilter.Param] == configuredBrfParam)
+
+    val nonIdempotentClient = methodBuilder.nonIdempotent
+
+    // Ensure BRF is disabled after calling `nonIdempotent`
+    assert(nonIdempotentClient.params[BackupRequestFilter.Param] == BackupRequestFilter.Disabled)
+  }
+
+  test("nonIdempotent client keeps existing ResponseClassifier in params ") {
+    val underlying = mock[Service[Int, Int]]
+    val svc = ServiceFactory.const(underlying)
+
+    val configuredResponseClassifierParam =
+      param.ResponseClassifier(ResponseClassifier.RetryOnTimeout)
+
+    // Configure BackupRequestFilter
+    val params = Stack.Params.empty + configuredResponseClassifierParam
+
+    val stack = Stack.Leaf(Stack.Role("test"), svc)
+
+    val stackClient = TestStackClient(stack, params)
+    val methodBuilder = MethodBuilder.from("with classifier", stackClient)
+
+    // Ensure classifier is configured before calling `nonIdempotent`
+    assert(methodBuilder.params[param.ResponseClassifier] == configuredResponseClassifierParam)
+
+    val nonIdempotentClient = methodBuilder.nonIdempotent
+
+    // Ensure classifier is still in params after calling `nonIdempotent`
+    assert(nonIdempotentClient.params[param.ResponseClassifier] ==
+      configuredResponseClassifierParam)
+  }
+
+  test("nonIdempotent sets ResponseClassifier.default for Retries") {
+    val stats = new InMemoryStatsReceiver()
+    val timer = new MockTimer()
+    val classifier: ResponseClassifier = {
+      case ReqRep(_, Throw(_)) => ResponseClass.RetryableFailure
+    }
+    val params =
+      Stack.Params.empty +
+        param.Timer(timer) +
+        param.Stats(stats) +
+        Retries.Budget(RetryBudget.Infinite) +
+        param.ResponseClassifier(classifier)
+
+    val svc: Service[Int, Int] = Service.mk { i =>
+      if (i == 0) throw new Exception("boom!")
+      else throw ChannelWriteException(new Exception("boom"))
+    }
+
+    val stack = Retries.moduleRequeueable[Int, Int]
+      .toStack(Stack.Leaf(Stack.Role("test"), ServiceFactory.const(svc)))
+    val stackClient = TestStackClient(stack, params)
+    val mb = MethodBuilder.from("mb", stackClient)
+
+    // ensure we *do* get retries with unchanged
+    val client = mb.newService("a_client")
+
+    val rep1 = client(0)
+    intercept[Exception] {
+      Await.result(rep1, 1.second)
+    }
+    eventually {
+      assert(stats.counters(Seq("mb", "a_client", "logical", "requests")) == 1)
+      assert(stats.stat("mb", "a_client", "retries")() == Seq(2))
+    }
+
+    // ensure we *don't* get retries for non-WriteExceptions with idempotent client
+    val nonIdempotentClient = mb.nonIdempotent.newService("a_client_nonidempotent")
+
+    val rep2 = nonIdempotentClient(0)
+    intercept[Exception] {
+      Await.result(rep2, 1.second)
+    }
+    eventually {
+      assert(stats.counters(Seq("mb", "a_client_nonidempotent", "logical", "requests")) == 1)
+      assert(stats.stat("mb", "a_client_nonidempotent", "retries")() == Seq(0))
+    }
+
+    // This request should trigger a WriteException and thus is retried/requeued in RequeueFilter,
+    // per ResponseClassifier.default, but not retried in MethodBuilder's retries.
+    val writeExceptionReq = nonIdempotentClient(1)
+    intercept[Exception] {
+      Await.result(writeExceptionReq, 1.second)
+    }
+    eventually {
+      assert(stats.counters(Seq("mb", "a_client_nonidempotent", "logical", "requests")) == 2)
+      assert(stats.stat("mb", "a_client_nonidempotent", "retries")() == Seq(0, 0))
+      // Requeued 20 times
+      // (Infinite budget has balance of 100 * 0.2 max requeues per request = 20)
+      assert(stats.stat("retries", "requeues_per_request")() == Seq(0, 0, 0, 0, 20))
+    }
+  }
+
+  test("idempotent uses passed params to configure BackupRequestFilter/ResponseClassifier") {
+    val stats = new InMemoryStatsReceiver()
+    val timer = new MockTimer()
+    val params =
+      Stack.Params.empty +
+        param.Timer(timer) +
+        param.Stats(stats) +
+        Retries.Budget(RetryBudget.Infinite)
+
+    val perReqTimeout = 50.milliseconds
+    val totalTimeout = perReqTimeout * 2 + 20.milliseconds
+    val classifier: ResponseClassifier = {
+      case ReqRep(_, Throw(_: IndividualRequestTimeoutException)) =>
+        ResponseClass.RetryableFailure
+    }
+    val svc: Service[Int, Int] = Service.mk { i =>
+      Future.sleep(perReqTimeout + 1.millis)(timer).map(_ => i)
+    }
+
+    val stack = TimeoutFilter
+      .clientModule[Int, Int]
+      .toStack(Stack.Leaf(Stack.Role("test"), ServiceFactory.const(svc)))
+    val stackClient = TestStackClient(stack, params)
+    val mb = MethodBuilder.from("mb", stackClient)
+      .withTimeout.perRequest(perReqTimeout)
+      .withTimeout.total(totalTimeout)
+      .idempotent(1.percent, true, classifier)
+
+    mb.params[BackupRequestFilter.Param] match {
+      case BackupRequestFilter.Param.Configured(maxExtraLoadTunable, sendInterrupts) =>
+        assert(maxExtraLoadTunable().get == 1.percent && sendInterrupts)
+      case _ => fail("BackupRequestFilter not configured")
+    }
+    assert(mb.params[param.ResponseClassifier].responseClassifier == classifier)
+
+    // ensure that the response classifier was also used to configure retries
+
+    val client = mb.newService("a_client")
+
+    Time.withCurrentTimeFrozen { tc =>
+      // issue the request
+      val rep = client(1)
+      assert(!rep.isDefined)
+
+      // hit the 1st per-req timeout.
+      tc.advance(perReqTimeout)
+      timer.tick()
+      assert(!rep.isDefined)
+
+      // hit the 2nd per-req timeout.
+      tc.advance(perReqTimeout)
+      timer.tick()
+      assert(!rep.isDefined)
+
+      // hit the total timeout
+      tc.advance(20.milliseconds)
+      timer.tick()
+      assert(rep.isDefined)
+
+      intercept[GlobalRequestTimeoutException] {
+        Await.result(rep, 5.seconds)
+      }
+
+      eventually {
+        // confirm there were 2 retries issued
+        assert(stats.stat("mb", "a_client", "retries")() == Seq(2))
+      }
+    }
+  }
+
+  test("idempotent that takes a Tunable uses it to configure BackupRequestFilter") {
+    val underlying = mock[Service[Int, Int]]
+    val svc = ServiceFactory.const(underlying)
+
+    val tunable = Tunable.const("brfTunable", 50.percent)
+    val stack = Stack.Leaf(Stack.Role("test"), svc)
+
+    val stackClient = TestStackClient(stack, Stack.Params.empty)
+    val mb = MethodBuilder.from("with Tunable", stackClient)
+      .idempotent(tunable, true, ResponseClassifier.Default)
+
+    assert(mb.params[BackupRequestFilter.Param] == BackupRequestFilter.Configured(tunable, true))
+  }
+
+  test("backup stats are scoped correctly") {
+    val stats = new InMemoryStatsReceiver()
+    val timer = new MockTimer
+
+    val svc: Service[Int, Int] = Service.const(Future.value(1))
+    val stack = Stack.Leaf(Stack.Role("test"), ServiceFactory.const(svc))
+
+    val stackClient = TestStackClient(
+      stack,
+      Stack.Params.empty + param.Timer(timer) + param.Stats(stats) + param.Label("clientLabel"))
+
+    val mb = MethodBuilder.from("mb", stackClient)
+      .idempotent(maxExtraLoad = 1.percent, true, ResponseClassifier.Default)
+
+    val client = mb.newService("a_method")
+    Time.withCurrentTimeFrozen { tc =>
+      Await.result(client(1), 1.second)
+      tc.advance(5.seconds)
+      timer.tick()
+      assert(stats.stat("clientLabel", "a_method", "backups", "send_backup_after_ms")()
+        == List(0.0))
+    }
+
+  }
+
+  test("idempotent combines existing clasifier with new one") {
+    val stats = new InMemoryStatsReceiver()
+    val timer = new MockTimer()
+
+    val myException1 = new Exception("boom1!")
+    val myException2 = new Exception("boomz2")
+
+    val existingClassifier: ResponseClassifier = {
+      case ReqRep(_, Throw(myException1)) => ResponseClass.RetryableFailure
+    }
+
+    val newClassifier: ResponseClassifier = {
+      case ReqRep(_, Throw(myException2)) => ResponseClass.RetryableFailure
+    }
+
+    val params =
+      Stack.Params.empty +
+        param.Timer(timer) +
+        param.Stats(stats) +
+        Retries.Budget(RetryBudget.Infinite) +
+        param.ResponseClassifier(existingClassifier)
+
+    val svc: Service[Int, Int] = Service.mk { i =>
+      if (i == 0) throw myException1
+      else throw myException2
+    }
+
+    val stack = Retries.moduleRequeueable[Int, Int]
+      .toStack(Stack.Leaf(Stack.Role("test"), ServiceFactory.const(svc)))
+    val stackClient = TestStackClient(stack, params)
+    val client = MethodBuilder.from("mb", stackClient).idempotent(1.percent, true, newClassifier)
+      .newService("a_client")
+
+    val rep1 = client(0)
+    val exc1 = intercept[Exception] {
+      Await.result(rep1, 1.second)
+    }
+    assert(exc1 == myException1)
+
+    // ensure exceptions that fall under exisitng classifier, and those that fall under the
+    // new classifier, are retried
+    eventually {
+      assert(stats.counters(Seq("mb", "a_client", "logical", "requests")) == 1)
+      assert(stats.stat("mb", "a_client", "retries")() == Seq(2))
+    }
+
+    val rep2 = client(1)
+    val exc2 = intercept[Exception] {
+      Await.result(rep2, 1.second)
+    }
+    assert(exc2 == myException2)
+
+    eventually {
+      assert(stats.counters(Seq("mb", "a_client", "logical", "requests")) == 2)
+      assert(stats.stat("mb", "a_client", "retries")() == Seq(2, 2))
+    }
+  }
+
+  test("idempotent does not remove any existing RetryBudget from params") {
+    val retryBudget = RetryBudget(5.seconds, 10, 0.1)
+    val params =
+      Stack.Params.empty +
+        Retries.Budget(retryBudget)
+
+    val svc: Service[Int, Int] = Service.const(Future.value(1))
+
+    val stack = Retries.moduleRequeueable[Int, Int]
+      .toStack(Stack.Leaf(Stack.Role("test"), ServiceFactory.const(svc)))
+    val stackClient = TestStackClient(stack, params)
+    val client = MethodBuilder.from("mb", stackClient)
+      .idempotent(1.percent, true, ResponseClassifier.Default)
+
+    assert(client.params[Retries.Budget].retryBudget eq retryBudget)
+  }
+
+  test("idempotent adds retry budget to params") {
+    val params = Stack.Params.empty
+
+    val svc: Service[Int, Int] = Service.const(Future.value(1))
+
+    val stack = Retries.moduleRequeueable[Int, Int]
+      .toStack(Stack.Leaf(Stack.Role("test"), ServiceFactory.const(svc)))
+    val stackClient = TestStackClient(stack, params)
+    val client = MethodBuilder.from("mb", stackClient)
+
+    // there's no budget to start with; if we get the budget it's a new default one each time
+    assert(client.params[Retries.Budget].retryBudget ne client.params[Retries.Budget].retryBudget)
+
+    val idempotentClient = client.idempotent(1.percent, true, ResponseClassifier.Default)
+
+    // now that the budget has been added (a new default one), we get the same one each time
+    assert(
+      idempotentClient.params[Retries.Budget].retryBudget eq
+      idempotentClient.params[Retries.Budget].retryBudget)
+  }
 }

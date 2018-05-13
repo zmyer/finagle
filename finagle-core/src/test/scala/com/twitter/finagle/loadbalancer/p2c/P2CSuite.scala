@@ -1,8 +1,9 @@
 package com.twitter.finagle.loadbalancer.p2c
 
-import com.twitter.finagle.stats.{StatsReceiver, NullStatsReceiver}
+import com.twitter.finagle.loadbalancer.EndpointFactory
+import com.twitter.finagle.stats.{NullStatsReceiver, StatsReceiver}
 import com.twitter.finagle.util.Rng
-import com.twitter.finagle.{NoBrokersAvailableException, ServiceFactory}
+import com.twitter.finagle.{Address, NoBrokersAvailableException, ServiceFactory}
 import com.twitter.util.{Activity, Var}
 
 trait P2CSuite {
@@ -11,7 +12,7 @@ trait P2CSuite {
   // number of reqs
   val R: Int = 100000
   // tolerated variance
-  val ε: Double = 0.0001*R
+  val ε: Double = 0.0001 * R
 
   class Clock extends (() => Long) {
     var time: Long = 0L
@@ -19,7 +20,9 @@ trait P2CSuite {
     def apply(): Long = time
   }
 
-  trait P2CServiceFactory extends ServiceFactory[Unit, Int] {
+  trait P2CServiceFactory extends EndpointFactory[Unit, Int] {
+    def remake() = {}
+    def address = Address.Failed(new Exception)
     def meanLoad: Double
   }
 
@@ -40,8 +43,7 @@ trait P2CSuite {
   def assertEven(fs: Vector[P2CServiceFactory]) {
     val ml = fs.head.meanLoad
     for (f <- fs) {
-      assert(math.abs(f.meanLoad - ml) < ε,
-        "ml=%f; f.ml=%f; ε=%f".format(ml, f.meanLoad, ε))
+      assert(math.abs(f.meanLoad - ml) < ε, "ml=%f; f.ml=%f; ε=%f".format(ml, f.meanLoad, ε))
     }
   }
 }

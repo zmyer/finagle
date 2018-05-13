@@ -1,9 +1,9 @@
 package com.twitter.finagle
 
-import com.twitter.finagle.http.{Request, Response}
+import com.twitter.finagle.filter.NackAdmissionFilter
+import com.twitter.finagle.http.{Request, Response, serverErrorsAsFailures}
 import com.twitter.finagle.service.{ReqRep, ResponseClass, ResponseClassifier}
 import com.twitter.finagle.stats.InMemoryStatsReceiver
-import com.twitter.finagle.toggle.flag
 import com.twitter.util.{Await, Duration, Future, Return}
 import java.net.InetSocketAddress
 import org.scalatest.FunSuite
@@ -13,16 +13,21 @@ class HttpTest extends FunSuite {
   private def classifier(params: Stack.Params): ResponseClassifier =
     params[param.ResponseClassifier].responseClassifier
 
-  test("client uses custom response classifier when specified") {
-    flag.overrides.let(Http.ServerErrorsAsFailuresToggleId, 1.0) {
-      val customRc: ResponseClassifier = {
-        case _ => ResponseClass.Success
-      }
+  test("client stack includes exactly one NackAdmissionFilter") {
+    val client = Http.client
+    val stack = client.stack
 
-      val client = new Http.Client().withResponseClassifier(customRc)
-      val rc = classifier(client.params)
-      assert(rc == customRc)
+    assert(stack.tails.count(_.head.role == NackAdmissionFilter.role) == 1)
+  }
+
+  test("client uses custom response classifier by default") {
+    val customRc: ResponseClassifier = {
+      case _ => ResponseClass.Success
     }
+
+    val client = new Http.Client().withResponseClassifier(customRc)
+    val rc = classifier(client.params)
+    assert(rc == customRc)
   }
 
   test("responseClassifierParam toggled off") {
@@ -36,8 +41,8 @@ class HttpTest extends FunSuite {
     def repClass(rep: Response): ResponseClass =
       rc.applyOrElse(reqRep(rep), ResponseClassifier.Default)
 
-    // using the default classifier
-    flag.overrides.let(Http.ServerErrorsAsFailuresToggleId, 0.0) {
+    // disabling the classifier
+    serverErrorsAsFailures.let(false) {
       assert(rc.isDefinedAt(reqRep(rep(HStatus.Ok))))
       assert(rc.isDefinedAt(reqRep(rep(HStatus.BadRequest))))
       assert(rc.isDefinedAt(reqRep(rep(HStatus.ServiceUnavailable))))
@@ -60,7 +65,7 @@ class HttpTest extends FunSuite {
       rc.applyOrElse(reqRep(rep), ResponseClassifier.Default)
 
     // uses the ServerErrorsAsFailures classifier for 500s
-    flag.overrides.let(Http.ServerErrorsAsFailuresToggleId, 1.0) {
+    serverErrorsAsFailures.let(true) {
       assert(rc.isDefinedAt(reqRep(rep(HStatus.Ok))))
       assert(rc.isDefinedAt(reqRep(rep(HStatus.BadRequest))))
       assert(rc.isDefinedAt(reqRep(rep(HStatus.ServiceUnavailable))))
@@ -85,17 +90,18 @@ class HttpTest extends FunSuite {
     }
 
     val server =
-      Http.server
-        .withHttpStats
+      Http.server.withHttpStats
         .withStatsReceiver(serverReceiver)
         .withLabel("stats_test_server")
         .serve(":*", service)
 
     val client =
-      Http.client
-        .withHttpStats
+      Http.client.withHttpStats
         .withStatsReceiver(clientReceiver)
-        .newService("localhost:" + server.boundAddress.asInstanceOf[InetSocketAddress].getPort, "stats_test_client")
+        .newService(
+          "localhost:" + server.boundAddress.asInstanceOf[InetSocketAddress].getPort,
+          "stats_test_client"
+        )
 
     Await.result(client(Request()), Duration.fromSeconds(5))
 
@@ -106,27 +112,28 @@ class HttpTest extends FunSuite {
     assert(clientReceiver.counters(Seq("stats_test_client", "http", "status", "404")) == 1)
     assert(clientReceiver.counters(Seq("stats_test_client", "http", "status", "4XX")) == 1)
     assert(clientReceiver.stats(Seq("stats_test_client", "http", "response_size")) == Seq(5.0))
+    assert(
+      clientReceiver.gauges.contains(Seq("stats_test_client", "dispatcher", "serial", "queue_size"))
+    )
   }
 
   test("server uses custom response classifier when specified") {
-    flag.overrides.let(Http.ServerErrorsAsFailuresToggleId, 1.0) {
-      val customRc: ResponseClassifier = {
-        case _ => ResponseClass.Success
-      }
-
-      val client = new Http.Server().withResponseClassifier(customRc)
-      val rc = classifier(client.params)
-      assert(rc == customRc)
+    val customRc: ResponseClassifier = {
+      case _ => ResponseClass.Success
     }
+
+    val client = new Http.Server().withResponseClassifier(customRc)
+    val rc = classifier(client.params)
+    assert(rc == customRc)
   }
 
-  test("Netty 3 is a default implementation") {
+  test("Netty 4 is a default implementation") {
     val transporter = Http.client.params[Http.HttpImpl].transporter
     val listener = Http.server.params[Http.HttpImpl].listener
 
     val addr = InetSocketAddress.createUnresolved("supdog", 0)
 
-    assert(transporter(Stack.Params.empty)(addr).toString == "Netty3Transporter")
-    assert(listener(Stack.Params.empty).toString == "Netty3Listener")
+    assert(transporter(Stack.Params.empty)(addr).toString == "Netty4Transporter")
+    assert(listener(Stack.Params.empty).toString == "Netty4Listener")
   }
 }

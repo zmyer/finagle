@@ -24,6 +24,7 @@ URLs if possible) and [submit a pull request][1]!
 * [Green Man Gaming](http://www.greenmangaming.com/)
 * [Gutefrage.net](http://www.gutefrage.net/)
   * ["Introducing Gutefrage.net's Service-Oriented Architecture"][2]
+* [Hotels.com](https://www.hotels.com)
 * [Hotel Urbano](https://www.hotelurbano.com/)
 * [Hopper](https://www.hopper.com/)
 * [ING Bank](https://ing.nl/)
@@ -41,7 +42,7 @@ URLs if possible) and [submit a pull request][1]!
   * ["How we make pins more useful"][3]
 * [Quanttus](http://www.Quanttus.com/)
 * [Qubit](http://www.qubitproducts.com/)
-* [QuizUp] (https://www.quizup.com/)
+* [QuizUp](https://www.quizup.com/)
 * [Rdio](https://www.rdio.com/)
   * [Thor, a Finagle-based image processor][4]
 * [Reputation.com](https://www.reputation.com/)
@@ -49,6 +50,7 @@ URLs if possible) and [submit a pull request][1]!
 * [Salesforce](https://www.salesforce.com/)
 * [Sharethrough](https://www.sharethrough.com/)
   * ["Finagle @ Sharethrough: Twitter #Conf Presentation"][5]
+* [Sigma](https://sig.ma)
 * [SmartNews](https://www.smartnews.com/en/)
   * ["Scala (Finagle) @ SmartNews"][12]
 * [SoFi](https://www.sofi.com/)
@@ -67,10 +69,16 @@ URLs if possible) and [submit a pull request][1]!
   * [Case study][9] by [Typesafe][10]
 * [Teads.tv](https://teads.tv/)
 * [Tendril](http://www.tendrilinc.com/)
+* [Threat Stack](https://www.threatstack.com/)
+* [Tinder](https://www.tinder.com/)
+* [Tradeshift](https://tradeshift.com/)
 * [Tumblr](https://www.tumblr.com/)
 * [Twitter](https://twitter.com/)
   * ["Finagle: A Protocol-Agnostic RPC System"][11]
 * [wasted.io](http://wasted.io/)
+* [XiaoMi](https://www.mi.com/)
+  * ["Linden: A distributed and real-time search engine built on top of
+    Lucene"][13]
 
 [0]: https://twitter.com/finagle
 [1]: https://github.com/twitter/finagle/blob/master/CONTRIBUTING.md
@@ -85,3 +93,5 @@ URLs if possible) and [submit a pull request][1]!
 [10]: https://typesafe.com/
 [11]: https://blog.twitter.com/2011/finagle-a-protocol-agnostic-rpc-system
 [12]: https://www.slideshare.net/ShigekazuTakei/scalafinaglesmartnewsenglish
+[13]: https://github.com/XiaoMi/linden
+

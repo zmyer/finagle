@@ -2,19 +2,14 @@ package com.twitter.finagle.toggle
 
 import com.twitter.finagle.stats.{InMemoryStatsReceiver, NullStatsReceiver}
 import com.twitter.logging.{BareFormatter, Level, Logger, StringHandler}
-import org.junit.runner.RunWith
 import org.scalacheck.Arbitrary.arbitrary
 import org.scalacheck.Gen
-import org.scalatest.junit.JUnitRunner
 import org.scalatest.prop.GeneratorDrivenPropertyChecks
 import org.scalatest.{FunSuite, Matchers}
 import scala.collection.immutable
 import scala.util.Random
 
-@RunWith(classOf[JUnitRunner])
-class ToggleMapTest extends FunSuite
-  with GeneratorDrivenPropertyChecks
-  with Matchers {
+class ToggleMapTest extends FunSuite with GeneratorDrivenPropertyChecks with Matchers {
 
   private val IntGen = arbitrary[Int]
 
@@ -201,11 +196,11 @@ class ToggleMapTest extends FunSuite
     assert(NullToggleMap == ToggleMap.of())
   }
 
-  private class NumApply extends ToggleMap.Proxy {
+  private class NumApply extends ToggleMap with ToggleMap.Proxy {
     private var nApply = 0
     def numApply: Int = nApply
 
-    protected val underlying: ToggleMap = ToggleMap.newMutable()
+    val underlying: ToggleMap = ToggleMap.newMutable()
     override def apply(id: String): Toggle[Int] = {
       nApply += 1
       super.apply(id)
@@ -222,7 +217,7 @@ class ToggleMapTest extends FunSuite
     // for how many times it was added to the aggregated ToggleMap
     assert(1 == tm0.numApply)
     assert(1 == tm1.numApply)
-    assert(Seq(tm0, tm1) == ToggleMap.components(of))
+    assert(Seq(tm0, tm1).flatMap(ToggleMap.components) == ToggleMap.components(of))
   }
 
   test("ToggleMap.Flags with empty Flags") {
@@ -277,7 +272,7 @@ class ToggleMapTest extends FunSuite
       assert(someToggle.isDefinedAt(Int.MinValue))
       assert(!someToggle(Int.MinValue))
       assert(someToggle.isDefinedAt(Int.MaxValue))
-      assert(!someToggle(Int.MaxValue))
+      assert(someToggle(Int.MaxValue))
     }
   }
 
@@ -289,6 +284,20 @@ class ToggleMapTest extends FunSuite
     flag.overrides.let(map) {
       assert(ToggleMap.flags.iterator.isEmpty)
     }
+  }
+
+  test("ToggleMap.Flags return values reflect bindings") {
+    val toggle = ToggleMap.flags("com.toggle.test")
+
+    val res1 = flag.overrides.let(Map("com.toggle.test" -> 1.0)) {
+      toggle(0)
+    }
+    assert(res1)
+
+    val res2 = flag.overrides.let(Map("com.toggle.test" -> 0.0)) {
+      toggle(0)
+    }
+    assert(!res2)
   }
 
   test("ToggleMap.Flags Toggles see changes to the flag") {
@@ -344,14 +353,24 @@ class ToggleMapTest extends FunSuite
 
     val mds01 = tm01.iterator.toSeq
     assert(mds01.size == 2)
-    assert(mds01.exists { md => md.id == "com.toggle.t0" && md.fraction == 0.0 })
-    assert(mds01.exists { md => md.id == "com.toggle.t1" && md.fraction == 1.0 })
+    assert(mds01.exists { md =>
+      md.id == "com.toggle.t0" && md.fraction == 0.0
+    })
+    assert(mds01.exists { md =>
+      md.id == "com.toggle.t1" && md.fraction == 1.0
+    })
 
     val mds012 = tm012.iterator.toSeq
     assert(mds012.size == 3)
-    assert(mds012.exists { md => md.id == "com.toggle.t0" && md.fraction == 0.0 })
-    assert(mds012.exists { md => md.id == "com.toggle.t1" && md.fraction == 1.0 })
-    assert(mds012.exists { md => md.id == "com.toggle.t2" && md.fraction == 0.3 })
+    assert(mds012.exists { md =>
+      md.id == "com.toggle.t0" && md.fraction == 0.0
+    })
+    assert(mds012.exists { md =>
+      md.id == "com.toggle.t1" && md.fraction == 1.0
+    })
+    assert(mds012.exists { md =>
+      md.id == "com.toggle.t2" && md.fraction == 0.3
+    })
   }
 
   test("ToggleMap.orElse.iterator uses Toggles from earlier ToggleMaps") {
@@ -364,7 +383,9 @@ class ToggleMapTest extends FunSuite
     val tm01 = NullToggleMap.orElse(tm0).orElse(tm1)
     val mds = tm01.iterator.toSeq
     assert(mds.size == 1)
-    assert(mds.exists { md => md.id == "com.toggle.t0" && md.fraction == 0.0 }, mds)
+    assert(mds.exists { md =>
+      md.id == "com.toggle.t0" && md.fraction == 0.0
+    }, mds)
   }
 
   test("ToggleMap.orElse.apply") {
@@ -404,8 +425,10 @@ class ToggleMapTest extends FunSuite
     assert(Seq(tm0, tm1) == ToggleMap.components(tm0.orElse(tm1)))
     assert(Seq(tm1, tm0) == ToggleMap.components(tm1.orElse(tm0)))
     assert(Seq(tm0, tm1, tm2) == ToggleMap.components(tm0.orElse(tm1).orElse(tm2)))
-    assert(Seq(tm0, tm1, tm2) == ToggleMap.components(
-      ToggleMap.observed(tm0.orElse(tm1).orElse(tm2), NullStatsReceiver)))
+    assert(
+      Seq(tm0, tm1, tm2) == ToggleMap
+        .components(ToggleMap.observed(tm0.orElse(tm1).orElse(tm2), NullStatsReceiver))
+    )
   }
 
   test("ToggleMap.On") {
@@ -424,6 +447,19 @@ class ToggleMapTest extends FunSuite
       assert(!toggle(i))
     }
     assert(Iterator.empty.sameElements(ToggleMap.Off.iterator))
+  }
+
+  test("Toggles are independent") {
+    val map = ToggleMap.newMutable()
+    map.put("com.toggle.t0", 0.001)
+    map.put("com.toggle.t1", 0.001)
+
+    val t0 = map("com.toggle.t0")
+    val t1 = map("com.toggle.t1")
+    
+    // These inputs were found from observation
+    assert(t0(602) && !t1(602))
+    assert(!t0(1129) && t1(1129))
   }
 
 }

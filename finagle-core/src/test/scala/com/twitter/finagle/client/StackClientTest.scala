@@ -5,15 +5,16 @@ import com.twitter.finagle.Stack.Module0
 import com.twitter.finagle._
 import com.twitter.finagle.context.Contexts
 import com.twitter.finagle.dispatch.SerialClientDispatcher
-import com.twitter.finagle.factory.BindingFactory
+import com.twitter.finagle.filter.ClearContextValueFilter
+import com.twitter.finagle.naming.BindingFactory
 import com.twitter.finagle.loadbalancer.LoadBalancerFactory
 import com.twitter.finagle.naming.{DefaultInterpreter, NameInterpreter}
-import com.twitter.finagle.netty3.Netty3Transporter
+import com.twitter.finagle.netty4.Netty4Transporter
 import com.twitter.finagle.server.StringServer
 import com.twitter.finagle.service.FailFastFactory.FailFast
 import com.twitter.finagle.service.PendingRequestFilter
 import com.twitter.finagle.stats.InMemoryStatsReceiver
-import com.twitter.finagle.transport.Transport
+import com.twitter.finagle.transport.{Transport, TransportContext}
 import com.twitter.finagle.util.StackRegistry
 import com.twitter.finagle.{Name, param}
 import com.twitter.util._
@@ -21,17 +22,15 @@ import com.twitter.util.registry.{Entry, GlobalRegistry, SimpleRegistry}
 import java.net.{InetAddress, InetSocketAddress, SocketAddress}
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicInteger
-import org.junit.runner.RunWith
 import org.scalatest.{BeforeAndAfter, FunSuite}
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
-import org.scalatest.junit.JUnitRunner
 
 private object StackClientTest {
   case class LocalCheckingStringClient(
-      localKey: Contexts.local.Key[String],
-      stack: Stack[ServiceFactory[String, String]] = StackClient.newStack,
-      params: Stack.Params = Stack.Params.empty)
-    extends StdStackClient[String, String, LocalCheckingStringClient] {
+    localKey: Contexts.local.Key[String],
+    stack: Stack[ServiceFactory[String, String]] = StackClient.newStack,
+    params: Stack.Params = Stack.Params.empty
+  ) extends StdStackClient[String, String, LocalCheckingStringClient] {
 
     protected def copy1(
       stack: Stack[ServiceFactory[String, String]] = this.stack,
@@ -40,18 +39,21 @@ private object StackClientTest {
 
     protected type In = String
     protected type Out = String
+    protected type Context = TransportContext
 
-    protected def newTransporter(addr: SocketAddress): Transporter[String, String] =
-      Netty3Transporter(StringClientPipeline, addr, params)
+    protected def newTransporter(
+      addr: SocketAddress
+    ): Transporter[String, String, TransportContext] =
+      Netty4Transporter.raw(StringClient.StringClientPipeline, addr, params)
 
     protected def newDispatcher(
-      transport: Transport[In, Out]
+      transport: Transport[In, Out] { type Context <: LocalCheckingStringClient.this.Context }
     ): Service[String, String] = {
       Contexts.local.get(localKey) match {
         case Some(s) =>
           Service.constant(
-            Future.exception(
-              new IllegalStateException("should not have a local context: " + s)))
+            Future.exception(new IllegalStateException("should not have a local context: " + s))
+          )
         case None =>
           new SerialClientDispatcher(transport)
       }
@@ -59,19 +61,35 @@ private object StackClientTest {
   }
 }
 
-@RunWith(classOf[JUnitRunner])
-class StackClientTest extends FunSuite
-  with StringClient
-  with StringServer
-  with BeforeAndAfter
-  with Eventually
-  with IntegrationPatience {
+class StdStackClientTest extends AbstractStackClientTest {
+  type ClientType = StringClient.Client
+  def baseClient: ClientType = StringClient.client
+  def transporterName: String = "Netty4Transporter"
+}
+
+class PushStackClientTest extends AbstractStackClientTest {
+  type ClientType = PushStringClient.Client
+  def baseClient: ClientType = PushStringClient.client
+  def transporterName: String = "Netty4PushTransporter"
+}
+
+abstract class AbstractStackClientTest
+    extends FunSuite
+    with BeforeAndAfter
+    with Eventually
+    with IntegrationPatience {
+
+  type ClientType <: EndpointerStackClient[String, String, ClientType]
+
+  def baseClient: ClientType
+  def transporterName: String
 
   trait Ctx {
     val sr = new InMemoryStatsReceiver
-    val client = stringClient
-      .configured(param.Stats(sr))
+    val client = baseClient.configured(param.Stats(sr))
   }
+
+  def await[T](awaitable: Awaitable[T]): T = Await.result(awaitable, 5.seconds)
 
   after {
     NameInterpreter.global = DefaultInterpreter
@@ -82,7 +100,10 @@ class StackClientTest extends FunSuite
     client.newService("inet!127.0.0.1:8080")
     eventually {
       val counter = sr.counters(Seq("inet!127.0.0.1:8080", "loadbalancer", "adds"))
-      assert(counter == 1, s"The instance should be to the loadbalancer once instead of $counter times.")
+      assert(
+        counter == 1,
+        s"The instance should be to the loadbalancer once instead of $counter times."
+      )
     }
 
     // use param.Label when set
@@ -112,7 +133,7 @@ class StackClientTest extends FunSuite
   })
 
   test("FailFast is respected") {
-    val ctx = new Ctx { }
+    val ctx = new Ctx {}
 
     val ex = new RuntimeException("lol")
     val alwaysFail = new Module0[ServiceFactory[String, String]] {
@@ -141,17 +162,17 @@ class StackClientTest extends FunSuite
 
     def testClient(name: String, failFastOn: Option[Boolean]): Unit = {
       val svc = newClient(name, failFastOn)
-      val e = intercept[RuntimeException] { Await.result(svc("hi")) }
+      val e = intercept[RuntimeException] { await(svc("hi")) }
       assert(e == ex)
       failFastOn match {
         case Some(on) if !on =>
           assert(ctx.sr.counters.get(Seq(name, "failfast", "marked_dead")) == None)
-          intercept[RuntimeException] { Await.result(svc("hi2")) }
+          intercept[RuntimeException] { await(svc("hi2")) }
         case _ =>
           eventually {
             assert(ctx.sr.counters(Seq(name, "failfast", "marked_dead")) == 1)
           }
-          intercept[FailedFastException] { Await.result(svc("hi2")) }
+          intercept[FailedFastException] { await(svc("hi2")) }
       }
     }
 
@@ -168,31 +189,35 @@ class StackClientTest extends FunSuite
     var closed = false
 
     val underlyingFactory = new ServiceFactory[Unit, Unit] {
-      def apply(conn: ClientConnection) = Future.value(new Service[Unit, Unit] {
-        def apply(request: Unit): Future[Unit] = Future.Unit
+      def apply(conn: ClientConnection) =
+        Future.value(new Service[Unit, Unit] {
+          def apply(request: Unit): Future[Unit] = Future.Unit
 
-        override def close(deadline: Time) = {
-          closed = true
-          Future.Done
-        }
-      })
+          override def close(deadline: Time) = {
+            closed = true
+            Future.Done
+          }
+        })
 
       def close(deadline: Time) = Future.Done
     }
 
-    val stack = StackClient.newStack[Unit, Unit]
+    val stack = StackClient
+      .newStack[Unit, Unit]
       .concat(Stack.Leaf(Stack.Role("role"), underlyingFactory))
       // don't pool or else we don't see underlying close until service is ejected from pool
       .remove(DefaultPool.Role)
 
-    val factory = stack.make(Stack.Params.empty +
-      FactoryToService.Enabled(true) +
+    val factory = stack.make(
+      Stack.Params.empty +
+        FactoryToService.Enabled(true) +
 
-      // default Dest is /$/fail
-      BindingFactory.Dest(Name.Path(Path.read("/$/inet/localhost/0"))))
+        // default Dest is /$/fail
+        BindingFactory.Dest(Name.Path(Path.read("/$/inet/localhost/0")))
+    )
 
     val service = new FactoryToService(factory)
-    Await.result(service(()))
+    await(service(()))
 
     assert(closed)
   }
@@ -208,68 +233,83 @@ class StackClientTest extends FunSuite
     var closed = false
 
     val underlyingFactory = new ServiceFactory[Unit, Unit] {
-      def apply(conn: ClientConnection) = Future.value(new Service[Unit, Unit] {
-        def apply(request: Unit): Future[Unit] = Future.Unit
+      def apply(conn: ClientConnection) =
+        Future.value(new Service[Unit, Unit] {
+          def apply(request: Unit): Future[Unit] = Future.Unit
 
-        override def close(deadline: Time) = {
-          closed = true
-          Future.Done
-        }
-      })
+          override def close(deadline: Time) = {
+            closed = true
+            Future.Done
+          }
+        })
 
       def close(deadline: Time) = Future.Done
     }
 
-    val stack = StackClient.newStack[Unit, Unit]
+    val stack = StackClient
+      .newStack[Unit, Unit]
       .concat(Stack.Leaf(Stack.Role("role"), underlyingFactory))
       // don't pool or else we don't see underlying close until service is ejected from pool
       .remove(DefaultPool.Role)
-
-      .replace(StackClient.Role.prepFactory, { next: ServiceFactory[Unit, Unit] =>
-        next map { service: Service[Unit, Unit] =>
-          new ServiceProxy[Unit, Unit](service) {
-            override def close(deadline: Time) = Future.never
+      .replace(
+        StackClient.Role.prepFactory, { next: ServiceFactory[Unit, Unit] =>
+          next map { service: Service[Unit, Unit] =>
+            new ServiceProxy[Unit, Unit](service) {
+              override def close(deadline: Time) = Future.never
+            }
           }
         }
-      })
+      )
 
-    val factory = stack.make(Stack.Params.empty +
-      FactoryToService.Enabled(true) +
+    val factory = stack.make(
+      Stack.Params.empty +
+        FactoryToService.Enabled(true) +
 
-      // default Dest is /$/fail
-      BindingFactory.Dest(Name.Path(Path.read("/$/inet/localhost/0"))))
+        // default Dest is /$/fail
+        BindingFactory.Dest(Name.Path(Path.read("/$/inet/localhost/0")))
+    )
 
     val service = new FactoryToService(factory)
-    Await.result(service(()))
+    await(service(()))
 
     assert(!closed)
   }
 
   trait RequeueCtx {
-    var count = 0
-    var _status: Status = Status.Open
+    var sessionDispatchCount = 0
+    var sessionCloseCount = 0
+    var _svcFacStatus: Status = Status.Open
+    var _sessionStatus: Status = Status.Open
 
     var runSideEffect = (_: Int) => false
     var sideEffect = () => ()
+    var closeSideEffect = () => ()
 
     val stubLB = new ServiceFactory[String, String] {
-      def apply(conn: ClientConnection) = Future.value(new Service[String, String] {
-        def apply(request: String): Future[String] = {
-          count += 1
-          if (runSideEffect(count)) sideEffect()
-          Future.exception(WriteException(new Exception("boom")))
-        }
+      def apply(conn: ClientConnection) =
+        Future.value(new Service[String, String] {
+          def apply(request: String): Future[String] = {
+            sessionDispatchCount += 1
+            if (runSideEffect(sessionDispatchCount)) sideEffect()
+            Future.exception(WriteException(new Exception("boom")))
+          }
 
-        override def close(deadline: Time) = Future.Done
-      })
+          override def close(deadline: Time) = {
+            sessionCloseCount += 1
+            closeSideEffect()
+            Future.Done
+          }
+
+          override def status: Status = _sessionStatus
+        })
 
       def close(deadline: Time) = Future.Done
 
-      override def status = _status
+      override def status = _svcFacStatus
     }
 
     val sr = new InMemoryStatsReceiver
-    val client = stringClient.configured(param.Stats(sr))
+    val client = baseClient.configured(param.Stats(sr))
 
     val stk = client.stack.replace(
       LoadBalancerFactory.role,
@@ -292,7 +332,7 @@ class StackClientTest extends FunSuite
     val session = cl()
     val b = budget
     // failing request and Open load balancer => max requeues
-    Await.ready(session.map(_("hi")), 5.seconds)
+    await(session.map(_("hi")))
     assert(requeues == Some(DefaultRequeues))
     assert(budget == b - DefaultRequeues)
   })
@@ -300,18 +340,18 @@ class StackClientTest extends FunSuite
   for (status <- Seq(Status.Busy, Status.Closed)) {
     test(s"don't requeue failing requests when the stack is $status")(new RequeueCtx {
       // failing request and Busy | Closed load balancer => zero requeues
-      _status = status
-      Await.ready(cl().map(_("hi")), 5.seconds)
+      _svcFacStatus = status
+      await(cl().map(_("hi")))
       assert(requeues.isEmpty)
     })
   }
 
   test("dynamically stop requeuing")(new RequeueCtx {
     // load balancer begins Open, becomes Busy after 10 requeues => 10 requeues
-    _status = Status.Open
+    _svcFacStatus = Status.Open
     runSideEffect = _ > DefaultRequeues
-    sideEffect = () => _status = Status.Busy
-    Await.ready(cl().map(_("hi")), 5.seconds)
+    sideEffect = () => _svcFacStatus = Status.Busy
+    await(cl().map(_("hi")))
     assert(requeues == Some(DefaultRequeues))
   })
 
@@ -323,7 +363,7 @@ class StackClientTest extends FunSuite
       def close(deadline: Time) = Future.Done
     }
 
-    intercept[Failure] { Await.result(cl(), 5.seconds) }
+    intercept[Failure] { await(cl()) }
     assert(requeues.isDefined)
     assert(budget > 0)
   })
@@ -336,19 +376,27 @@ class StackClientTest extends FunSuite
       def close(deadline: Time) = Future.Done
     }
 
-    intercept[Failure] { Await.result(cl(), 5.seconds) }
+    intercept[Failure] { await(cl()) }
 
     assert(requeues.isEmpty)
     assert(budget > 0)
   })
 
   test("service acquisition requeues respect Status.Open")(new RequeueCtx {
-    _status = Status.Closed
-    Await.result(cl(), 5.seconds)
+    _svcFacStatus = Status.Closed
+    await(cl())
     assert(requeues.isEmpty)
     assert(budget > 0)
   })
 
+  test("service acquisition requeues will close Status.Closed sessions") {
+    val ctx = new RequeueCtx { }
+    ctx._svcFacStatus = Status.Open
+    ctx._sessionStatus = Status.Closed
+    ctx.closeSideEffect = () => ctx._sessionStatus = Status.Open
+    await(ctx.cl())
+    assert(ctx.sessionCloseCount == 1)
+  }
 
   test("Requeues all go to the same cluster in a Union") {
     /*
@@ -383,17 +431,22 @@ class StackClientTest extends FunSuite
     NameInterpreter.global = new NameInterpreter {
       override def bind(dtab: Dtab, path: Path): Activity[NameTree[Name.Bound]] = {
         assert(dtab == baseDtab)
-        Activity.value(NameTree.Union(
-          NameTree.Weighted(1D, NameTree.Leaf(Name.bound(addr1))),
-          NameTree.Weighted(1D, NameTree.Leaf(Name.bound(addr2)))))
+        Activity.value(
+          NameTree.Union(
+            NameTree.Weighted(1D, NameTree.Leaf(Name.bound(addr1))),
+            NameTree.Weighted(1D, NameTree.Leaf(Name.bound(addr2)))
+          )
+        )
       }
     }
 
-    val stack = StackClient.newStack[Unit, Unit]
+    val stack = StackClient
+      .newStack[Unit, Unit]
 
       // direct the two addresses to the two service factories instead
       // of trying to connect to them
-      .replace(LoadBalancerFactory.role,
+      .replace(
+        LoadBalancerFactory.role,
         new Stack.Module1[LoadBalancerFactory.Dest, ServiceFactory[Unit, Unit]] {
           val role = new Stack.Role("role")
           val description = "description"
@@ -405,31 +458,37 @@ class StackClientTest extends FunSuite
               case _ => throw new IllegalArgumentException("wat")
             }
           }
-        })
+        }
+      )
 
     val sr = new InMemoryStatsReceiver
 
     val service =
-      new FactoryToService(stack.make(Stack.Params.empty +
-        FactoryToService.Enabled(true) +
-        param.Stats(sr) +
-        BindingFactory.BaseDtab(() => baseDtab)))
+      new FactoryToService(
+        stack.make(
+          Stack.Params.empty +
+            FactoryToService.Enabled(true) +
+            param.Stats(sr) +
+            BindingFactory.BaseDtab(() => baseDtab)
+        )
+      )
 
     intercept[Failure] {
-      Await.result(service(()), 5.seconds)
+      await(service(()))
     }
 
     val requeues = sr.counters(Seq("retries", "requeues"))
 
     // all retries go to one service
     assert(
-      (fac1.count == requeues+1 && fac2.count == 0) ||
-        (fac2.count == requeues+1 && fac1.count == 0))
+      (fac1.count == requeues + 1 && fac2.count == 0) ||
+        (fac2.count == requeues + 1 && fac1.count == 0)
+    )
   }
 
   test("StackBasedClient.configured is a StackClient") {
     // compilation test
-    val client: StackBasedClient[String, String] = stringClient
+    val client: StackBasedClient[String, String] = baseClient
     val client2: StackBasedClient[String, String] =
       client.configured(param.Label("foo"))
     val client3: StackBasedClient[String, String] =
@@ -438,7 +497,7 @@ class StackClientTest extends FunSuite
 
   test("StackClient.configured is a StackClient") {
     // compilation test
-    val client: StackClient[String, String] = stringClient
+    val client: StackClient[String, String] = baseClient
     val client2: StackClient[String, String] =
       client.configured(param.Label("foo"))
     val client3: StackClient[String, String] =
@@ -446,18 +505,22 @@ class StackClientTest extends FunSuite
   }
 
   test("StackClient binds to a local service via exp.Address.ServiceFactory") {
-    val reverser = Service.mk[String, String] { in => Future.value(in.reverse) }
+    val reverser = Service.mk[String, String] { in =>
+      Future.value(in.reverse)
+    }
     val sf = ServiceFactory(() => Future.value(reverser))
     val addr = exp.Address(sf)
     val name = Name.bound(addr)
-    val service = stringClient.newService(name, "sfsa-test")
+    val service = baseClient.newService(name, "sfsa-test")
     val forward = "a man a plan a canal: panama"
-    val reversed = Await.result(service(forward), 1.second)
+    val reversed = await(service(forward))
     assert(reversed == forward.reverse)
   }
 
   test("filtered composes filters atop the stack") {
-    val echoServer = Service.mk[String, String] { in => Future.value(in) }
+    val echoServer = Service.mk[String, String] { in =>
+      Future.value(in)
+    }
     val sf = ServiceFactory(() => Future.value(echoServer))
     val addr = exp.Address(sf)
     val name = Name.bound(addr)
@@ -467,8 +530,8 @@ class StackClientTest extends FunSuite
         svc(str.reverse)
     }
 
-    val svc = stringClient.filtered(reverseFilter).newRichClient(name, "test_client")
-    assert(Await.result(svc.ping(), 1.second) == "ping".reverse)
+    val svc = baseClient.filtered(reverseFilter).newService(name, "test_client")
+    assert(await(svc("ping")) == "ping".reverse)
   }
 
   test("endpointer clears Contexts") {
@@ -476,16 +539,15 @@ class StackClientTest extends FunSuite
 
     val key = new Contexts.local.Key[String]
     Contexts.local.let(key, "SomeCoolContext") {
-      val echoSvc = Service.mk[String, String]{ Future.value }
-      val server = stringServer.serve(
-        new InetSocketAddress(InetAddress.getLoopbackAddress, 0),
-        echoSvc)
+      val echoSvc = Service.mk[String, String] { Future.value }
+      val server =
+        StringServer.server.serve(new InetSocketAddress(InetAddress.getLoopbackAddress, 0), echoSvc)
       val ia = server.boundAddress.asInstanceOf[InetSocketAddress]
 
       val client = new LocalCheckingStringClient(key)
         .newService(Name.bound(Address(ia)), "a-label")
 
-      val result = Await.result(client("abc"), 5.seconds)
+      val result = await(client("abc"))
       assert("abc" == result)
     }
   }
@@ -505,21 +567,24 @@ class StackClientTest extends FunSuite
     val (endpoint1, endpoint2) = (new CountingService(p1), new CountingService(p2))
     var first = true
 
-    val stack = StackClient.newStack[Unit, Unit]
-      .concat(Stack.Leaf(Stack.Role("role"),
-        new ServiceFactory[Unit, Unit] {
-          def apply(conn: ClientConnection): Future[Service[Unit, Unit]] =
-            if (first) {
-              first = false
-              Future.value(endpoint1)
-            }
-            else {
-              Future.value(endpoint2)
-            }
+    val stack = StackClient
+      .newStack[Unit, Unit]
+      .concat(
+        Stack.Leaf(
+          Stack.Role("role"),
+          new ServiceFactory[Unit, Unit] {
+            def apply(conn: ClientConnection): Future[Service[Unit, Unit]] =
+              if (first) {
+                first = false
+                Future.value(endpoint1)
+              } else {
+                Future.value(endpoint2)
+              }
 
-          def close(deadline: Time): Future[Unit] = Future.Done
-        }
-      ))
+            def close(deadline: Time): Future[Unit] = Future.Done
+          }
+        )
+      )
       .remove(DefaultPool.Role)
 
     val sr = new InMemoryStatsReceiver
@@ -531,13 +596,14 @@ class StackClientTest extends FunSuite
           high = 2,
           bufferSize = 0,
           idleTime = Duration.Zero,
-          maxWaiters = 0) +
+          maxWaiters = 0
+        ) +
         FactoryToService.Enabled(false) +
         PendingRequestFilter.Param(Some(2)) +
         BindingFactory.Dest(Name.Path(Path.read("/$/inet/localhost/0")))
 
     val svcFac = stack.make(params)
-    val session1 = Await.result(svcFac(), 3.seconds)
+    val session1 = await(svcFac())
 
     // pending
     val e1r1 = session1(())
@@ -546,9 +612,9 @@ class StackClientTest extends FunSuite
     // rejected
     val e1r3 = session1(())
 
-    val e1rejected = intercept[Failure] { Await.result(e1r3, 3.seconds) }
+    val e1rejected = intercept[Failure] { await(e1r3) }
 
-    val session2 = Await.result(svcFac(), 3.seconds)
+    val session2 = await(svcFac())
     // pending
     val e2r1 = session2(())
     // pending
@@ -556,7 +622,7 @@ class StackClientTest extends FunSuite
     // rejected
     val e2r3 = session2(())
 
-    val e2rejected = intercept[Failure] { Await.result(e2r3, 3.seconds) }
+    val e2rejected = intercept[Failure] { await(e2r3) }
 
     // endpoint1 and endpoint2 both only see the first two requests,
     // meaning they get distinct pending request limits
@@ -569,7 +635,6 @@ class StackClientTest extends FunSuite
     intercept[RejectedExecutionException] { throw e1rejected.cause.get }
     intercept[RejectedExecutionException] { throw e2rejected.cause.get }
 
-
     // pending requests are satisfied
     p1.setDone()
     p2.setDone()
@@ -581,33 +646,70 @@ class StackClientTest extends FunSuite
     val e2r5 = session2(())
     val e2r6 = session2(())
 
-    Await.result(e2r4, 3.seconds)
-    Await.result(e2r5, 3.seconds)
-    Await.result(e2r6, 3.seconds)
+    await(e2r4)
+    await(e2r5)
+    await(e2r6)
 
     assert(endpoint2.satisfied.get() == 5)
   }
 
   test("exports transporter type to registry") {
-    val listeningServer = stringServer
+    val listeningServer = StringServer.server
       .serve(":*", Service.mk[String, String](Future.value(_)))
     val boundAddress = listeningServer.boundAddress.asInstanceOf[InetSocketAddress]
 
     val label = "stringClient"
-    val svc = stringClient.newService(Name.bound(Address(boundAddress)), label)
+    val svc = baseClient.newService(Name.bound(Address(boundAddress)), label)
 
     val registry = new SimpleRegistry
-    Await.result(GlobalRegistry.withRegistry(registry) {
+    await(GlobalRegistry.withRegistry(registry) {
       svc("hello world")
-    }, 5.seconds)
+    })
 
     val expectedEntry = Entry(
       key = Seq("client", StringClient.protocolLibrary, label, "Transporter"),
-      value = "Netty3Transporter")
+      value = transporterName
+    )
 
     assert(registry.iterator.contains(expectedEntry))
 
-    Await.result(listeningServer.close(), 5.seconds)
-    Await.result(svc.close(), 5.seconds)
+    await(listeningServer.close())
+    await(svc.close())
+  }
+
+  test("Sources exceptions") {
+    val listeningServer = StringServer.server
+      .serve(":*", Service.mk[String, String](Future.value(_)))
+    val boundAddress = listeningServer.boundAddress.asInstanceOf[InetSocketAddress]
+    val label = "stringClient"
+
+    val throwsModule = new Stack.Module0[ServiceFactory[String, String]] {
+      val role = Stack.Role("Throws")
+      val description = "Throws Exception"
+
+      def make(
+        next: ServiceFactory[String, String]
+      ): ServiceFactory[String, String] =
+        (new SimpleFilter[String, String] {
+          def apply(
+            request: String,
+            service: Service[String, String]
+          ): Future[String] = Future.exception(new Failure("boom!"))
+        }).andThen(next)
+    }
+
+    // Insert a module that throws near before [[ExceptionSourceFilter]].
+    // We could insert using [[ExceptionSourceFilter]] as the relative insertion point, but we use
+    // another module instead so that if the [[ExceptionSourceFilter]] were moved earlier in the
+    // stack, this test would fail.
+    val svc = baseClient.withStack(baseClient.stack.insertBefore(
+      ClearContextValueFilter.role, throwsModule))
+      .newService(Name.bound(Address(boundAddress)), label)
+
+    val failure = intercept[Failure] {
+      await(svc("hello"))
+    }
+
+   assert(failure.toString == "Failure(boom!, flags=0x00) with Service -> stringClient")
   }
 }

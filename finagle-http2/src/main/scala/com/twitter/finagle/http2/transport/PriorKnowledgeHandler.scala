@@ -1,17 +1,17 @@
 package com.twitter.finagle.http2.transport
 
 import com.twitter.finagle.Stack
-import com.twitter.finagle.http2.Settings
-import com.twitter.finagle.netty4.http.exp._
+import com.twitter.finagle.http2.param.{EncoderIgnoreMaxHeaderListSize, FrameLoggerNamePrefix}
+import com.twitter.finagle.http2.{LoggerPerFrameTypeLogger, Settings}
+import com.twitter.finagle.netty4.http._
 import com.twitter.finagle.param.Stats
+import com.twitter.finagle.stats.Gauge
 import com.twitter.logging.Logger
 import io.netty.buffer.{ByteBuf, ByteBufUtil}
-import io.netty.channel.{
-  Channel, ChannelHandlerContext, ChannelInboundHandlerAdapter, ChannelInitializer, ChannelOption
-}
+import io.netty.channel.{Channel, ChannelFuture, ChannelFutureListener, ChannelHandlerContext, ChannelInboundHandlerAdapter, ChannelInitializer}
 import io.netty.handler.codec.http2.Http2CodecUtil.connectionPrefaceBuf
-import io.netty.handler.codec.http2.{Http2Codec, Http2FrameLogger, Http2StreamChannelBootstrap}
-import io.netty.handler.logging.LogLevel
+import io.netty.handler.codec.http2.Http2MultiplexCodecBuilder
+import io.netty.util.AttributeKey
 
 /**
  * This handler allows an instant upgrade to HTTP/2 if the first bytes received from the client
@@ -24,9 +24,9 @@ import io.netty.handler.logging.LogLevel
  * This handler is stateful and should not be shared!
  */
 private[http2] class PriorKnowledgeHandler(
-    initializer: ChannelInitializer[Channel],
-    params: Stack.Params)
-  extends ChannelInboundHandlerAdapter {
+  initializer: ChannelInitializer[Channel],
+  params: Stack.Params
+) extends ChannelInboundHandlerAdapter {
 
   val prefaceToRead: ByteBuf = connectionPrefaceBuf
   var bytesConsumed: Integer = 0
@@ -38,7 +38,6 @@ private[http2] class PriorKnowledgeHandler(
 
     msg match {
       case buf: ByteBuf =>
-
         val p = ctx.pipeline()
 
         // We compare bytes as long as they match the preface.
@@ -47,8 +46,13 @@ private[http2] class PriorKnowledgeHandler(
 
         // if what we have read does not match the preface, remove this handler
         // and make sure to send all bytes we have consumed so far downstream.
-        if (bytesRead == 0 || !ByteBufUtil.equals(buf, buf.readerIndex(),
-          prefaceToRead, prefaceToRead.readerIndex(), bytesRead)) {
+        if (bytesRead == 0 || !ByteBufUtil.equals(
+            buf,
+            buf.readerIndex(),
+            prefaceToRead,
+            prefaceToRead.readerIndex(),
+            bytesRead
+          )) {
           p.remove(this)
           buf.resetReaderIndex()
 
@@ -61,7 +65,6 @@ private[http2] class PriorKnowledgeHandler(
           return
         }
 
-
         bytesConsumed += bytesRead
         buf.skipBytes(bytesRead)
         prefaceToRead.skipBytes(bytesRead)
@@ -72,14 +75,14 @@ private[http2] class PriorKnowledgeHandler(
           upgradeCounter.incr()
 
           // we have read a complete preface. Setup HTTP/2 pipeline.
-          val initialSettings = Settings.fromParams(params)
-          val logger = new Http2FrameLogger(LogLevel.TRACE, classOf[Http2Codec])
-          val bootstrap = new Http2StreamChannelBootstrap()
-            .option(ChannelOption.ALLOCATOR, ctx.alloc())
-            .handler(initializer)
-
-          val codec = new Http2Codec(true /* server */ , bootstrap, logger, initialSettings)
-          p.replace(HttpCodecName, "http2Codec", codec)
+          val initialSettings = Settings.fromParams(params, isServer = true)
+          val logger = new LoggerPerFrameTypeLogger(params[FrameLoggerNamePrefix].loggerNamePrefix)
+          val codec = Http2MultiplexCodecBuilder.forServer(initializer)
+            .frameLogger(logger)
+            .initialSettings(initialSettings)
+            .encoderIgnoreMaxHeaderListSize(params[EncoderIgnoreMaxHeaderListSize].ignoreMaxHeaderListSize)
+            .build()
+          p.replace(HttpCodecName, Http2CodecName, codec)
           p.remove("upgradeHandler")
 
           // Since we changed the pipeline, our current ctx points to the wrong handler
@@ -88,6 +91,17 @@ private[http2] class PriorKnowledgeHandler(
           p.remove(this)
 
           nextCtx.channel.config.setAutoRead(true)
+
+          val streams = statsReceiver.addGauge("streams") { codec.connection.numActiveStreams }
+
+          // We're attaching a gauge to the channel's attributes to make sure it stays referenced
+          // as long as channel is alive.
+          nextCtx.channel.attr(AttributeKey.valueOf[Gauge]("streams_gauge")).set(streams)
+
+          // We're removing the gauge on channel closure.
+          nextCtx.channel.closeFuture.addListener(new ChannelFutureListener {
+            def operationComplete(f: ChannelFuture): Unit = streams.remove()
+          })
 
           // Send new preface downstream as HTTP/2 codec needs it and we ate the original.
           // As the preface might have been matched over several iterations, we cannot
@@ -101,8 +115,12 @@ private[http2] class PriorKnowledgeHandler(
       case _ =>
         // Not sure if there are valid cases for this. Allow it for now but log it.
 
-        Logger.get(this.getClass).warning(s"Unexpected non ByteBuf message read: " +
-          s"${msg.getClass.getName} - $msg")
+        Logger
+          .get(this.getClass)
+          .warning(
+            s"Unexpected non ByteBuf message read: " +
+              s"${msg.getClass.getName} - $msg"
+          )
         ctx.fireChannelRead(msg)
     }
   }

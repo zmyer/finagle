@@ -13,10 +13,13 @@ import scala.collection.mutable
  *
  * The map is a multi-map.  Use [[getAll]] to get all values for a key.  Use [[add]]
  * to append a key-value.
+ *
+ * @note This structure isn't thread-safe. Any concurrent access should be synchronized
+ *       externally.
  */
 abstract class HeaderMap
-  extends mutable.Map[String, String]
-  with mutable.MapLike[String, String, HeaderMap] {
+    extends mutable.Map[String, String]
+    with mutable.MapLike[String, String, HeaderMap] {
 
   /**
    * Retrieves all values for a given header name.
@@ -62,12 +65,11 @@ abstract class HeaderMap
    * but with standard formatting for dates in HTTP headers.
    */
   @deprecated("Use `.set(String, Date)` instead", "2017-02-01")
-  def += (kv: (String, Date)): HeaderMap =
-    += ((kv._1, HeaderMap.format(kv._2)))
+  def +=(kv: (String, Date)): HeaderMap =
+    +=((kv._1, HeaderMap.format(kv._2)))
 
-  override def empty: HeaderMap = MapHeaderMap()
+  override def empty: HeaderMap = DefaultHeaderMap()
 }
-
 
 object HeaderMap {
 
@@ -76,7 +78,7 @@ object HeaderMap {
    * @note the headers are added to the new `HeaderMap` via `add` operations.
    */
   def apply(headers: (String, String)*): HeaderMap =
-    MapHeaderMap(headers: _*)
+    DefaultHeaderMap(headers: _*)
 
   /** Create a new, empty HeaderMap. */
   def newHeaderMap: HeaderMap = apply()

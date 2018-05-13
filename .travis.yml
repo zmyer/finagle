@@ -14,22 +14,20 @@ env:
     - PROJECT=finagle-http
     - PROJECT=finagle-http2
     - PROJECT=finagle-integration
-    - PROJECT=finagle-kestrel
-    - PROJECT=finagle-mdns
     - PROJECT=finagle-mux
     - PROJECT=finagle-mysql
     - PROJECT=finagle-netty4
     - PROJECT=finagle-netty4-http
-    - PROJECT=finagle-ostrich4
+    - PROJECT=finagle-netty3
     - PROJECT=finagle-redis
     - PROJECT=finagle-serversets
     - PROJECT=finagle-stats
-    - PROJECT=finagle-stream
     - PROJECT=finagle-thrift
     - PROJECT=finagle-thriftmux
     - PROJECT=finagle-toggle
+    - PROJECT=finagle-tunable
     - PROJECT=finagle-zipkin-core
-    - PROJECT=finagle-zipkin
+    - PROJECT=finagle-zipkin-scribe
 
 # These directories are cached to S3 at the end of the build
 cache:
@@ -45,16 +43,15 @@ before_cache:
   - find $HOME/.sbt -name "*.lock" -delete
 
 scala:
-  - 2.11.8
-  - 2.12.1
+  - 2.11.11
+  - 2.12.4
 
 jdk:
   - oraclejdk8
 
 notifications:
-  hipchat:
-    rooms:
-      secure: UlvjA1u/K7a/ykVt9hfRksqI5coq9k5fFqpeGCcEmqPOyrkOnCLj21xHHB16SzUfwy3pqjVK+B8kWORB9zaNyalHZm6I11Ba1hfmPXWemH/qA972IN/hdAQxnMVhhnWqJPzuoVlW7WAFxwltPTbAwDMzIczmsyMv+rCc2Xffiks=
+  slack:
+    secure: Xd8uDpC8fR9I6RiVZMHCqQ1MRLyBKrBfWtefRbXoUv4kOmyB+JPtNqe+PqNb18xtMvx5GYHNu+Cqel2m6Z5ZVekTPVKJIoVFvW+NytcF/zE1v0wYuCJdfQm58VMKOskriRZxBf4w3HUkcArc8r1N6AnCY5h35jsrI1ER59lTcso=
 
 before_script:
   # default $SBT_OPTS is irrelevant to sbt lancher

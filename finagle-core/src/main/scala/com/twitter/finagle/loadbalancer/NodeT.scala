@@ -7,7 +7,8 @@ import com.twitter.finagle.ServiceFactory
  * load metric that is used. [[DistributorT]]'s will use these to decide
  * where to balance the next request.
  */
-private[loadbalancer] trait NodeT[Req, Rep] extends ServiceFactory[Req, Rep] {
+private trait NodeT[Req, Rep] extends ServiceFactory[Req, Rep] {
+
   /**
    * The current load, in units of the active metric.
    */
@@ -19,13 +20,9 @@ private[loadbalancer] trait NodeT[Req, Rep] extends ServiceFactory[Req, Rep] {
   def pending: Int
 
   /**
-   * A token is a random integer identifying the node.
-   * It persists through node updates.
+   * The underlying service factory which this node proxies to.
    */
-  def token: Int
+  def factory: EndpointFactory[Req, Rep]
 
-  /**
-   * The underlying service factory.
-   */
-  def factory: ServiceFactory[Req, Rep]
+  override def toString: String = f"Node(load=$load%1.3f, pending=$pending%1.3f, factory=$factory)"
 }

@@ -25,7 +25,7 @@ verbosity.
     .withTransport.verbose
     .newService("localhost:10000,localhost:10001")
 
-A higher-level client API, :ref:`MethodBuilder <methodbuilder>`, builds on
+A :ref:`higher-level client API <methodbuilder>`, `MethodBuilder`, builds on
 the client, providing logical success rate metrics, application-level retry
 policies, per-attempt timeouts, and total timeouts.
 
@@ -211,9 +211,9 @@ parameters of clients and servers at runtime.
 Concepts
 ~~~~~~~~
 
-A :util-tunable-src:`Tunable <com/twitter/util/tunable/Tunable.scala>` is like a Function0;
+A :util-tunable-src:`Tunable <com/twitter/util/tunable/Tunable.scala>` is like a `Function0`;
 it produces a value when applied. Dynamic configuration facilitates this value changing
-across invokations at runtime.
+across invocations at runtime.
 
 `Tunables` are accessed by means of a
 :util-tunable-src:`TunableMap <com/twitter/util/tunable/TunableMap.scala>`, which contains all the
@@ -226,7 +226,7 @@ Usage
 Accessing the `TunableMap` for a given id is done via
 :finagle-tunable-src:`StandardTunableMap <com/twitter/finagle/tunable/StandardTunableMap.scala>`,
 using `StandardTunableMap.apply("myId")`.
-The returned map composes in-memory, local-file, and service-loaded configurations.
+The returned map composes in-memory, service-loaded configurations and local files.
 
 Here is an example of configuring the :src:`TimeoutFilter <com/twitter/finagle/service/TimeoutFilter.scala>`
 on an HTTP client with a `Tunable`:
@@ -236,7 +236,6 @@ on an HTTP client with a `Tunable`:
   package com.example.service
 
   import com.twitter.finagle.Http
-  import com.twitter.finagle.service.TimeoutFilter
   import com.twitter.finagle.tunable.StandardTunableMap
   import com.twitter.util.Duration
   import com.twitter.util.tunable.{Tunable, TunableMap}
@@ -250,22 +249,28 @@ on an HTTP client with a `Tunable`:
 
   val client = Http.client
     .withLabel(clientId)
-    .configured(TimeoutFilter.Param(timeoutTunable))
+    .withRequestTimeout(timeoutTunable)
     .newService("localhost:10000")
 
 Configuration
 ~~~~~~~~~~~~~
-The value of a given `Tunable` is the result of the composition of in-memory, local-file,
-and service-loaded configurations, in that order. If a configuration does not exist, the value
-from the next configuration is used. 
+The value of a given `Tunable` is the result of the composition of in-memory, service-loaded
+configurations and local files, in that order. If a configuration does not exist
+the value from the next configuration is used.
 
 For example, if a server starts up with a file-based configuration for a given id, those values will
 be used. If the in-memory configuration is then set, those new values will be used.
 
 In-Memory
 ^^^^^^^^^
-The `Tunable` values used by a given instance can be modified using TwitterServer's
-"/admin/tunables" `API endpoint <https://twitter.github.io/twitter-server/Admin.html#admin-tunables>`_.
+In-memory configuration is provided through a
+:util-tunable-src:`TunableMap <com/twitter/util/tunable/TunableMap.scala>`. The Tunable values used
+by a given instance can be modified using TwitterServer's `/admin/tunables`
+`API endpoint <https://twitter.github.io/twitter-server/Admin.html#admin-tunables>`_.
+
+.. code-block:: scala
+
+  val map = TunableMap.newMutable(source)
 
 File-Based
 ^^^^^^^^^^
@@ -274,7 +279,9 @@ File-based configurations are defined in JSON files with the format specified in
 :util-tunable-src:`JsonTunableMapper <com/twitter/util/tunable/JsonTunableMapper.scala>`.
 
 Per-environment and per-instance configurations are supported. Configurations for a given id are
-composed from files located at `resources/com/twitter/tunables/`, in the following order:
+composed from files located at `resources/com/twitter/tunables/`
+(ensure that the `resources` directory is properly packaged with your application) in the following
+order:
 
 1. $id/$env/instance-$instance.json
 2. $id/$env/instances.json

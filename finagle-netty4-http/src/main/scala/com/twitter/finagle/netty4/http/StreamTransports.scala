@@ -3,15 +3,16 @@ package com.twitter.finagle.netty4.http
 import com.twitter.finagle.dispatch.GenSerialClientDispatcher.wrapWriteException
 import com.twitter.finagle.http._
 import com.twitter.finagle.http.exp.{Multi, StreamTransportProxy}
-import com.twitter.finagle.netty4.{ByteBufAsBuf, BufAsByteBuf}
+import com.twitter.finagle.netty4.ByteBufConversion
 import com.twitter.finagle.transport.Transport
-import com.twitter.io.{Writer, Buf, Reader}
+import com.twitter.io.{Buf, Reader, Writer}
+import com.twitter.logging.Logger
 import com.twitter.util._
 import io.netty.handler.codec.{http => NettyHttp}
 import java.net.InetSocketAddress
 
-
 private[http] object StreamTransports {
+  val log = Logger.get()
 
   /**
    * Drain [[Transport]] messages into a [[Writer]] until `eos` indicates end
@@ -24,7 +25,7 @@ private[http] object StreamTransports {
   def copyToWriter[A](
     trans: Transport[_, A],
     writer: Writer
-   )(eos: A => Boolean)(chunkOfA: A => Buf): Future[Unit] =
+  )(eos: A => Boolean)(chunkOfA: A => Buf): Future[Unit] =
     trans.read().flatMap { a: A =>
       val chunk = chunkOfA(a)
       val writeF =
@@ -55,10 +56,10 @@ private[http] object StreamTransports {
     private[this] val writes = copyToWriter(trans, rw)(eos)(chunkOfA)
     forwardInterruptsTo(writes)
     writes.respond {
-      case ret@Throw(t) =>
+      case ret @ Throw(t) =>
         updateIfEmpty(ret)
         rw.fail(t)
-      case r@Return(_) =>
+      case r @ Return(_) =>
         updateIfEmpty(r)
         rw.close()
     }
@@ -75,11 +76,15 @@ private[http] object StreamTransports {
     case chunk: NettyHttp.HttpContent if chunk.content.readableBytes == 0 =>
       Buf.Empty
     case chunk: NettyHttp.HttpContent =>
-      ByteBufAsBuf.Owned(chunk.content)
+      ByteBufConversion.byteBufAsBuf(chunk.content)
+
+    case other =>
+      throw new IllegalArgumentException(
+        "Expected a HttpContent, but read an instance of " + other.getClass.getSimpleName)
   }
 
   def chunkOfBuf(buf: Buf): NettyHttp.HttpContent =
-    new NettyHttp.DefaultHttpContent(BufAsByteBuf.Owned(buf))
+    new NettyHttp.DefaultHttpContent(ByteBufConversion.bufAsByteBuf(buf))
 
   /**
    * Drain a [[Reader]] into a [[Transport]]. The inverse of collation.
@@ -96,7 +101,10 @@ private[http] object StreamTransports {
       case Some(buf) =>
         trans.write(chunkOfBuf(buf)).transform {
           case Return(_) => streamChunks(trans, r, bufSize)
-          case _ => Future(r.discard())
+          case Throw(t) => {
+            log.debug(t, "Failure while writing chunk to stream")
+            Future(r.discard())
+          }
         }
     }
   }
@@ -104,9 +112,8 @@ private[http] object StreamTransports {
   val isLast: Any => Boolean = _.isInstanceOf[NettyHttp.LastHttpContent]
 }
 
-private[finagle] class Netty4ServerStreamTransport(
-    rawTransport: Transport[Any, Any])
-  extends StreamTransportProxy[Response, Request](rawTransport){
+private[finagle] class Netty4ServerStreamTransport(rawTransport: Transport[Any, Any])
+    extends StreamTransportProxy[Response, Request](rawTransport) {
   import StreamTransports._
 
   private[this] val transport =
@@ -128,12 +135,10 @@ private[finagle] class Netty4ServerStreamTransport(
   def read(): Future[Multi[Request]] = {
     transport.read().flatMap {
       case req: NettyHttp.FullHttpRequest =>
-        val finagleReq = Bijections.netty.fullRequestToFinagle(req,
-          transport.remoteAddress match {
-            case ia: InetSocketAddress => ia
-            case _ => new InetSocketAddress(0)
-          }
-        )
+        val finagleReq = Bijections.netty.fullRequestToFinagle(req, transport.remoteAddress match {
+          case ia: InetSocketAddress => ia
+          case _ => new InetSocketAddress(0)
+        })
         Future.value(Multi(finagleReq, Future.Done))
 
       case req: NettyHttp.HttpRequest =>
@@ -157,9 +162,8 @@ private[finagle] class Netty4ServerStreamTransport(
   }
 }
 
-private[finagle] class Netty4ClientStreamTransport(
-    rawTransport: Transport[Any, Any])
-  extends StreamTransportProxy[Request, Response](rawTransport){
+private[finagle] class Netty4ClientStreamTransport(rawTransport: Transport[Any, Any])
+    extends StreamTransportProxy[Request, Response](rawTransport) {
   import StreamTransports._
 
   private[this] val transport =

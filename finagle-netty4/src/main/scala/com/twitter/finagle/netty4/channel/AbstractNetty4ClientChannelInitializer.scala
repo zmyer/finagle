@@ -2,9 +2,8 @@ package com.twitter.finagle.netty4.channel
 
 import com.twitter.finagle.Stack
 import com.twitter.finagle.client.Transporter
-import com.twitter.finagle.netty4.poolReceiveBuffers
 import com.twitter.finagle.netty4.proxy.{HttpProxyConnectHandler, Netty4ProxyConnectHandler}
-import com.twitter.finagle.netty4.ssl.client.Netty4ClientSslHandler
+import com.twitter.finagle.netty4.ssl.client.Netty4ClientSslChannelInitializer
 import com.twitter.finagle.param.{Label, Logger, Stats}
 import com.twitter.finagle.transport.Transport
 import com.twitter.util.Duration
@@ -16,9 +15,8 @@ import java.util.logging.Level
 /**
  * Base initializer which installs read / write timeouts and a connection handler
  */
-private[netty4] abstract class AbstractNetty4ClientChannelInitializer(
-  params: Stack.Params)
-  extends ChannelInitializer[Channel] {
+private[netty4] abstract class AbstractNetty4ClientChannelInitializer(params: Stack.Params)
+    extends ChannelInitializer[Channel] {
 
   import Netty4ClientChannelInitializer._
 
@@ -39,9 +37,9 @@ private[netty4] abstract class AbstractNetty4ClientChannelInitializer(
     else
       None
 
-  private[this] val (channelRequestStatsHandler, channelStatsHandler) =
+  private[this] val (sharedChannelRequestStats, sharedChannelStats) =
     if (!stats.isNull)
-      (Some(new ChannelRequestStatsHandler(stats)), Some(new ChannelStatsHandler(stats)))
+      (Some(new ChannelRequestStatsHandler.SharedChannelRequestStats(stats)), Some(new ChannelStatsHandler.SharedChannelStats(stats)))
     else
       (None, None)
 
@@ -58,9 +56,17 @@ private[netty4] abstract class AbstractNetty4ClientChannelInitializer(
 
     val pipe = ch.pipeline
 
-    channelStatsHandler.foreach(pipe.addFirst(ChannelStatsHandlerKey, _))
+    sharedChannelStats.foreach { sharedStats =>
+      val channelStatsHandler = new ChannelStatsHandler(sharedStats)
+      pipe.addFirst(ChannelStatsHandlerKey, channelStatsHandler)
+    }
+
     channelSnooper.foreach(pipe.addFirst(ChannelLoggerHandlerKey, _))
-    channelRequestStatsHandler.foreach(pipe.addLast(ChannelRequestStatsHandlerKey, _))
+
+    sharedChannelRequestStats.foreach { sharedStats =>
+      val channelRequestStatsHandler = new ChannelRequestStatsHandler(sharedStats)
+      pipe.addLast(ChannelRequestStatsHandlerKey, channelRequestStatsHandler)
+    }
 
     if (readTimeout.isFinite && readTimeout > Duration.Zero) {
       val (timeoutValue, timeoutUnit) = readTimeout.inTimeUnit
@@ -74,8 +80,8 @@ private[netty4] abstract class AbstractNetty4ClientChannelInitializer(
 
     pipe.addLast("exceptionHandler", exceptionHandler)
 
-    // Add SslHandler to the pipeline.
-    pipe.addFirst("sslInit", new Netty4ClientSslHandler(params))
+    // Add SSL/TLS Channel Initializer to the pipeline.
+    pipe.addFirst("sslInit", new Netty4ClientSslChannelInitializer(params))
 
     // SOCKS5 proxy via `Netty4ProxyConnectHandler`.
     socksAddress.foreach { sa =>
@@ -84,8 +90,13 @@ private[netty4] abstract class AbstractNetty4ClientChannelInitializer(
         case Some((u, p)) => new Socks5ProxyHandler(sa, u, p)
       }
 
-        pipe.addFirst("socksProxyConnect",
-          new Netty4ProxyConnectHandler(proxyHandler, bypassLocalhostConnections = true))
+      // Use only Finagle's session acquisition timeout
+      proxyHandler.setConnectTimeoutMillis(0)
+
+      pipe.addFirst(
+        "socksProxyConnect",
+        new Netty4ProxyConnectHandler(proxyHandler, bypassLocalhostConnections = true)
+      )
     }
 
     // HTTP proxy via `Netty4ProxyConnectHandler`.
@@ -95,6 +106,9 @@ private[netty4] abstract class AbstractNetty4ClientChannelInitializer(
         case Some(c) => new HttpProxyHandler(sa, c.username, c.password)
       }
 
+      // Use only Finagle's session acquisition timeout
+      proxyHandler.setConnectTimeoutMillis(0)
+
       // TODO: Figure out if it makes sense to bypass localhost connections when HTTP proxy is
       // enabled (see CSL-4409).
       pipe.addFirst("httpProxyConnect", new Netty4ProxyConnectHandler(proxyHandler))
@@ -102,14 +116,8 @@ private[netty4] abstract class AbstractNetty4ClientChannelInitializer(
 
     // TCP tunneling via HTTP proxy (using `HttpProxyConnectHandler`).
     httpHostAndCredentials.foreach {
-      case (host, credentials) => pipe.addFirst("httpProxyConnect",
-        new HttpProxyConnectHandler(host, credentials))
-    }
-
-    // Enable tracking of the receive buffer sizes (when `poolReceiveBuffers` is enabled).
-    if (poolReceiveBuffers()) {
-      pipe.addFirst("receiveBuffersSizeTracker",
-        new RecvBufferSizeStatsHandler(stats.scope("transport")))
+      case (host, credentials) =>
+        pipe.addFirst("httpProxyConnect", new HttpProxyConnectHandler(host, credentials))
     }
   }
 }

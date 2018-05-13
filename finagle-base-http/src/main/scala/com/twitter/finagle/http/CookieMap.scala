@@ -1,12 +1,31 @@
 package com.twitter.finagle.http
 
-import org.jboss.netty.handler.codec.http.{
-  HttpHeaders,
-  CookieDecoder => NettyCookieDecoder,
-  CookieEncoder => NettyCookieEncoder
-}
+import com.twitter.finagle.http.cookie.SameSite
+import com.twitter.finagle.http.cookie.exp.supportSameSiteCodec
+import com.twitter.finagle.http.netty3.Netty3CookieCodec
+import com.twitter.finagle.http.netty4.Netty4CookieCodec
+import com.twitter.finagle.server.ServerInfo
+import com.twitter.finagle.stats.LoadedStatsReceiver
+import org.jboss.netty.handler.codec.http.HttpHeaders
 import scala.collection.mutable
-import scala.collection.JavaConverters._
+
+private[finagle] object CookieMap {
+
+  val UseNetty4CookieCodec =
+    Toggles("com.twitter.finagle.http.UseNetty4CookieCodec")
+
+  private val cookieCodec =
+    if (UseNetty4CookieCodec(ServerInfo().id.hashCode())) Netty4CookieCodec
+    else Netty3CookieCodec
+
+  // Note that this is a def to allow it to be toggled for unit tests.
+  private[finagle] def includeSameSite: Boolean = supportSameSiteCodec()
+
+  private[finagle] val flaglessSameSitesCounter =
+    LoadedStatsReceiver.scope("http").scope("cookie").counter("flagless_samesites")
+  private[finagle] val silentlyDroppedSameSitesCounter =
+    LoadedStatsReceiver.scope("http").scope("cookie").counter("dropped_samesites")
+}
 
 /**
  * Adapt cookies of a Message to a mutable Map where cookies are indexed by
@@ -17,13 +36,17 @@ import scala.collection.JavaConverters._
  * cookie is removed from the CookieMap, a header is automatically removed from
  * the ''message''
  */
-class CookieMap(message: Message)
-  extends mutable.Map[String, Cookie]
-  with mutable.MapLike[String, Cookie, CookieMap] {
+class CookieMap private[twitter](message: Message, cookieCodec: CookieCodec)
+    extends mutable.Map[String, Cookie]
+    with mutable.MapLike[String, Cookie, CookieMap] {
+
+  def this(message: Message) =
+    this(message, CookieMap.cookieCodec)
 
   override def empty: CookieMap = new CookieMap(Request())
 
-  private[this] val underlying = mutable.Map[String, Set[Cookie]]().withDefaultValue(Set.empty)
+  private[this] val underlying =
+    mutable.Map[String, Set[Cookie]]().withDefaultValue(Set.empty)
 
   /**
    * Checks if there was a parse error. Invalid cookies are ignored.
@@ -38,11 +61,13 @@ class CookieMap(message: Message)
       HttpHeaders.Names.SET_COOKIE
 
   private[this] def decodeCookies(header: String): Iterable[Cookie] = {
-    val decoder = new NettyCookieDecoder
-    try {
-      decoder.decode(header).asScala map { new Cookie(_) }
-    } catch {
-      case e: IllegalArgumentException =>
+    val decoding =
+      if (message.isRequest) cookieCodec.decodeServer(header)
+      else cookieCodec.decodeClient(header)
+    decoding match {
+      case Some(decoding) =>
+        decoding
+      case None =>
         _isValid = false
         Nil
     }
@@ -54,16 +79,17 @@ class CookieMap(message: Message)
 
     // Add cookies back again
     if (message.isRequest) {
-      val encoder = new NettyCookieEncoder(false)
-      foreach { case (_, cookie) =>
-        encoder.addCookie(cookie.underlying)
-      }
-      message.headerMap.set(cookieHeaderName, encoder.encode())
+      message.headerMap.set(cookieHeaderName, cookieCodec.encodeClient(values))
     } else {
-      val encoder = new NettyCookieEncoder(true)
-      foreach { case (_, cookie) =>
-        encoder.addCookie(cookie.underlying)
-        message.headerMap.add(cookieHeaderName, encoder.encode())
+      foreach {
+        case (_, cookie) => {
+          message.headerMap.add(cookieHeaderName,
+            cookieCodec.encodeServer(cookie))
+          if (!message.headerMap.toString.contains("SameSite")
+              && cookie.sameSite != SameSite.Unset) {
+            CookieMap.silentlyDroppedSameSitesCounter.incr()
+          }
+        }
       }
     }
   }
@@ -71,10 +97,11 @@ class CookieMap(message: Message)
   /**
    * Returns an iterator that iterates over all cookies in this map.
    */
-  def iterator: Iterator[(String, Cookie)] = for {
-    (name, cookies) <- underlying.iterator
-    cookie <- cookies
-  } yield (name, cookie)
+  def iterator: Iterator[(String, Cookie)] =
+    for {
+      (name, cookies) <- underlying.iterator
+      cookie <- cookies
+    } yield (name, cookie)
 
   /**
    * Applies the given function ''f'' to each cookie in this map.
@@ -172,6 +199,13 @@ class CookieMap(message: Message)
     cookieHeader <- message.headerMap.getAll(cookieHeaderName)
     cookie <- decodeCookies(cookieHeader)
   } {
+    // Checks whether the SameSite attribute is set in the response but the
+    // codec is disabled. This is undesirable behavior so we wish to report it.
+    if (!CookieMap.includeSameSite
+        && message.isResponse
+        && cookieHeader.contains("SameSite")) {
+      CookieMap.flaglessSameSitesCounter.incr()
+    }
     add(cookie)
   }
 }

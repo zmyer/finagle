@@ -1,20 +1,20 @@
 package com.twitter.finagle.netty4.channel
 
 import io.netty.channel._
-import io.netty.util.concurrent.{Future => NettyFuture, GenericFutureListener}
+import io.netty.util.concurrent.{GenericFutureListener, Future => NettyFuture}
 
 /**
- * This trait provides [[GenericFutureListener]]s that are useful for implementing handlers
+ * This object provides [[GenericFutureListener]]s that are useful for implementing handlers
  * that delay a connect-promise until some additional step is done (i.e., HTTP proxy connect,
  * SSL handshake, etc).
  *
  * For example, this is used by:
  *
- * - [[com.twitter.finagle.netty4.ssl.SslConnectHandler]]
+ * - [[com.twitter.finagle.netty4.ssl.client.SslClientVerificationHandler]]
  * - [[com.twitter.finagle.netty4.proxy.HttpProxyConnectHandler]]
  * - [[com.twitter.finagle.netty4.proxy.Netty4ProxyConnectHandler]]
  */
-private[netty4] trait ConnectPromiseDelayListeners {
+private[netty4] object ConnectPromiseDelayListeners {
 
   /**
    * Creates a new [[GenericFutureListener]] that cancels a given `promise` when the
@@ -46,10 +46,10 @@ private[netty4] trait ConnectPromiseDelayListeners {
     promise: ChannelPromise
   ): GenericFutureListener[NettyFuture[Any]] = new GenericFutureListener[NettyFuture[Any]] {
     override def operationComplete(f: NettyFuture[Any]): Unit =
-    // We filter cancellation here since we assume it was proxied from the old promise and
-    // is already being handled in `cancelPromiseWhenCancelled`.
-    if (!f.isSuccess && !f.isCancelled) {
-      promise.setFailure(f.cause)
-    }
+      // We filter cancellation here since we assume it was proxied from the old promise and
+      // is already being handled in `cancelPromiseWhenCancelled`.
+      if (!f.isSuccess && !f.isCancelled) {
+        promise.setFailure(f.cause)
+      }
   }
 }

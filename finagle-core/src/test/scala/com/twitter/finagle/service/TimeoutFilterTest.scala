@@ -37,9 +37,12 @@ private object TimeoutFilterTest {
     val timer = new MockTimer()
     val tunable = Tunable.emptyMutable[Duration]("id")
 
-    val svc = Service.mk { _: String => Future.never }
+    val svc = Service.mk { _: String =>
+      Future.never
+    }
     val svcFactory = ServiceFactory.const(svc)
-    val stack = TimeoutFilter.clientModule[String, String]
+    val stack = TimeoutFilter
+      .clientModule[String, String]
       .toStack(Stack.Leaf(Stack.Role("test"), svcFactory))
 
     val params = Stack.Params.empty + param.Timer(timer) + TimeoutFilter.Param(tunable)
@@ -48,9 +51,7 @@ private object TimeoutFilterTest {
 }
 
 @RunWith(classOf[JUnitRunner])
-class TimeoutFilterTest extends FunSuite
-  with Matchers
-  with MockitoSugar {
+class TimeoutFilterTest extends FunSuite with Matchers with MockitoSugar {
 
   import TimeoutFilterTest.TimeoutFilterHelper
 
@@ -101,13 +102,16 @@ class TimeoutFilterTest extends FunSuite
     import ctx._
 
     Time.withCurrentTimeFrozen { tc =>
-      assert(Await.result(timeoutService((): Unit)) == Some(Deadline(Time.now, Time.now+1.second)))
+      assert(
+        Await.result(timeoutService((): Unit)) == Some(Deadline(Time.now, Time.now + 1.second))
+      )
 
       // Adjust existing ones.
-      val f = Contexts.broadcast.let(Deadline, Deadline(Time.now-1.second, Time.now+200.milliseconds)) {
-        timeoutService((): Unit)
-      }
-      assert(Await.result(f) == Some(Deadline(Time.now, Time.now+200.milliseconds)))
+      val f = Contexts.broadcast
+        .let(Deadline, Deadline(Time.now - 1.second, Time.now + 200.milliseconds)) {
+          timeoutService((): Unit)
+        }
+      assert(Await.result(f) == Some(Deadline(Time.now, Time.now + 200.milliseconds)))
     }
   }
 
@@ -119,10 +123,10 @@ class TimeoutFilterTest extends FunSuite
       assert(Await.result(timeoutService((): Unit)) == Some(Deadline(Time.now, Time.Top)))
 
       // Adjust existing ones
-      val f = Contexts.broadcast.let(Deadline, Deadline(Time.now-1.second, Time.now+1.second)) {
+      val f = Contexts.broadcast.let(Deadline, Deadline(Time.now - 1.second, Time.now + 1.second)) {
         timeoutService((): Unit)
       }
-      assert(Await.result(f) == Some(Deadline(Time.now, Time.now+1.second)))
+      assert(Await.result(f) == Some(Deadline(Time.now, Time.now + 1.second)))
     }
   }
 
@@ -133,7 +137,7 @@ class TimeoutFilterTest extends FunSuite
 
     Time.withCurrentTimeFrozen { tc =>
       val now = Time.now
-      val f = Contexts.broadcast.let(Deadline, Deadline(now, now+1.second)) {
+      val f = Contexts.broadcast.let(Deadline, Deadline(now, now + 1.second)) {
         tc.advance(5.seconds)
         timeoutService((): Unit)
       }
@@ -144,7 +148,9 @@ class TimeoutFilterTest extends FunSuite
   private def verifyFilterAddedOrNot(
     timoutModule: Stackable[ServiceFactory[Int, Int]]
   ) = {
-    val svc = Service.mk { i: Int => Future.value(i) }
+    val svc = Service.mk { i: Int =>
+      Future.value(i)
+    }
     val svcFactory = ServiceFactory.const(svc)
     val stack = timoutModule.toStack(Stack.Leaf(Stack.Role("test"), svcFactory))
 
@@ -227,10 +233,8 @@ class TimeoutFilterTest extends FunSuite
   test("typeAgnostic using timeout") {
     val timer = new MockTimer()
     val timeout = 5.seconds
-    val filter = TimeoutFilter.typeAgnostic(
-      timeout,
-      new IndividualRequestTimeoutException(timeout),
-      timer)
+    val filter =
+      TimeoutFilter.typeAgnostic(timeout, new IndividualRequestTimeoutException(timeout), timer)
 
     testTypeAgnostic(filter, timer)
   }
@@ -241,7 +245,8 @@ class TimeoutFilterTest extends FunSuite
     val filter = TimeoutFilter.typeAgnostic(
       timeoutTunable,
       timeout => new IndividualRequestTimeoutException(timeout),
-      timer)
+      timer
+    )
 
     testTypeAgnostic(filter, timer)
   }
@@ -252,7 +257,8 @@ class TimeoutFilterTest extends FunSuite
     val filter = new TimeoutFilter[String, String](
       () => atomicTimeout.get,
       timeout => new IndividualRequestTimeoutException(timeout),
-      timer)
+      timer
+    )
 
     val h = new TimeoutFilterHelper()
     val svc = filter.andThen(h.service)
@@ -296,7 +302,8 @@ class TimeoutFilterTest extends FunSuite
     val filter = new TimeoutFilter[String, String](
       () => atomicTimeout.get,
       timeout => new IndividualRequestTimeoutException(timeout),
-      timer)
+      timer
+    )
 
     val h = new TimeoutFilterHelper()
     val svc = filter.andThen(h.service)
@@ -318,7 +325,6 @@ class TimeoutFilterTest extends FunSuite
     import h._
 
     Time.withCurrentTimeFrozen { tc =>
-
       // No timeout because Tunable uses Duration.Top if applying it produces `None`
       val res = service("hello")
       assert(!res.isDefined)
@@ -355,12 +361,56 @@ class TimeoutFilterTest extends FunSuite
     }
   }
 
+  test("Tunable timeouts: Timeout if tunable is updated") {
+    val timer = new MockTimer()
+    val timeoutTunable = Tunable.emptyMutable[Duration]("id")
+    val filter = new TimeoutFilter[String, String](
+      timeoutTunable,
+      timeout => new IndividualRequestTimeoutException(timeout),
+      timer
+    )
+
+    val h = new TimeoutFilterHelper()
+    val svc = filter.andThen(h.service)
+
+    Time.withCurrentTimeFrozen { tc =>
+      timeoutTunable.set(5.seconds)
+      val res = svc("hello")
+      assert(!res.isDefined)
+
+      // not yet at the timeout
+      tc.advance(4.seconds)
+      timer.tick()
+      assert(!res.isDefined)
+
+      // go past the timeout
+      tc.advance(2.seconds)
+      timer.tick()
+      val ex = intercept[IndividualRequestTimeoutException] {
+        Await.result(res, 1.second)
+      }
+      ex.getMessage should include(timeoutTunable().get.toString)
+
+      // change the timeout
+      timeoutTunable.set(3.seconds)
+      val res2 = svc("hello")
+      assert(!res2.isDefined)
+
+      // this time, 4 seconds pushes us past
+      tc.advance(4.seconds)
+      timer.tick()
+      val ex2 = intercept[IndividualRequestTimeoutException] {
+        Await.result(res2, 1.second)
+      }
+      ex2.getMessage should include(timeoutTunable().get.toString)
+    }
+  }
+
   test("Tunable timeouts: No timeout if Tunable cleared") {
     val h = new TunableTimeoutHelper
     import h._
 
     Time.withCurrentTimeFrozen { tc =>
-
       // set the timeout
       tunable.set(3.seconds)
       val res = service("hello")

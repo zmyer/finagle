@@ -1,22 +1,28 @@
 package com.twitter.finagle.client
 
 import com.twitter.finagle.{Filter, Service, SimpleFilter}
+import com.twitter.util.tunable.Tunable
 import com.twitter.util.{Duration, Future}
 import scala.collection.mutable
 
 /**
- * '''Experimental:''' This API is under construction.
- *
  * @see [[MethodBuilderScaladoc]]
  */
-private[finagle] class MethodBuilderTimeout[Req, Rep] private[client] (
-    mb: MethodBuilder[Req, Rep]) {
+private[finagle] class MethodBuilderTimeout[Req, Rep] private[client] (mb: MethodBuilder[Req, Rep]) {
 
   /**
    * @see [[MethodBuilderScaladoc.withTimeoutTotal(Duration)]]
    */
   def total(howLong: Duration): MethodBuilder[Req, Rep] = {
-    val timeouts = mb.config.timeout.copy(total = howLong)
+    val timeouts = mb.config.timeout.copy(total = mb.config.timeout.total.copy(duration = howLong))
+    mb.withConfig(mb.config.copy(timeout = timeouts))
+  }
+
+  /**
+   * @see [[MethodBuilderScaladoc.withTimeoutTotal(Tunable[Duration])]]
+   */
+  def total(howLong: Tunable[Duration]): MethodBuilder[Req, Rep] = {
+    val timeouts = mb.config.timeout.copy(total = mb.config.timeout.total.copy(tunable = howLong))
     mb.withConfig(mb.config.copy(timeout = timeouts))
   }
 
@@ -24,20 +30,30 @@ private[finagle] class MethodBuilderTimeout[Req, Rep] private[client] (
    * @see [[MethodBuilderScaladoc.withTimeoutPerRequest(Duration)]]
    */
   def perRequest(howLong: Duration): MethodBuilder[Req, Rep] = {
-    val timeouts = mb.config.timeout.copy(perRequest = howLong)
+    val timeouts = mb.config.timeout.copy(perRequest = mb.config.timeout.perRequest.copy(duration = howLong))
+    mb.withConfig(mb.config.copy(timeout = timeouts))
+  }
+
+  /**
+   * @see [[MethodBuilderScaladoc.withTimeoutPerRequest(Tunable[Duration])]]
+   */
+  def perRequest(howLong: Tunable[Duration]): MethodBuilder[Req, Rep] = {
+    val timeouts = mb.config.timeout.copy(perRequest = mb.config.timeout.perRequest.copy(tunable = howLong))
     mb.withConfig(mb.config.copy(timeout = timeouts))
   }
 
   private[client] def totalFilter: Filter.TypeAgnostic = {
     val config = mb.config.timeout
-    if (!config.total.isFinite && !config.stackHadTotalTimeout) {
+    if (!config.total.isFinite &&
+        !config.total.isTunable &&
+        !config.stackTotalTimeoutDefined) {
       Filter.TypeAgnostic.Identity
     } else {
       new Filter.TypeAgnostic {
         def toFilter[Req1, Rep1]: Filter[Req1, Rep1, Req1, Rep1] = {
           val dyn = new SimpleFilter[Req1, Rep1] {
             def apply(req: Req1, service: Service[Req1, Rep1]): Future[Rep1] = {
-              DynamicTimeout.letTotalTimeout(config.total) {
+              DynamicTimeout.letTotalTimeout(config.total.toDuration) {
                 service(req)
               }
             }
@@ -58,7 +74,7 @@ private[finagle] class MethodBuilderTimeout[Req, Rep] private[client] (
       def toFilter[Req1, Rep1]: Filter[Req1, Rep1, Req1, Rep1] = {
         new SimpleFilter[Req1, Rep1] {
           def apply(req: Req1, service: Service[Req1, Rep1]): Future[Rep1] = {
-            DynamicTimeout.letPerRequestTimeout(config.perRequest) {
+            DynamicTimeout.letPerRequestTimeout(config.perRequest.toDuration) {
               service(req)
             }
           }
@@ -85,7 +101,7 @@ private[finagle] class MethodBuilderTimeout[Req, Rep] private[client] (
 private[client] object MethodBuilderTimeout {
 
   /**
-   * @param stackHadTotalTimeout indicates the stack originally had a total
+   * @param stackTotalTimeoutDefined indicates the stack originally had a total
    *                             timeout module. if `total` does not get
    *                             overridden by the module, it must still be added
    *                             back.
@@ -94,8 +110,22 @@ private[client] object MethodBuilderTimeout {
    * @param perRequest how long a '''single''' request is given to complete.
    */
   case class Config(
-      stackHadTotalTimeout: Boolean,
-      total: Duration = Duration.Undefined,
-      perRequest: Duration = Duration.Undefined)
+    stackTotalTimeoutDefined: Boolean,
+    total: TunableDuration = TunableDuration("total"),
+    perRequest: TunableDuration = TunableDuration("perRequest")
+  )
 
+  case class TunableDuration(
+    id: String,
+    duration: Duration = Duration.Undefined,
+    tunable: Tunable[Duration] = Tunable.none
+  ) {
+    def isFinite: Boolean = duration.isFinite
+    def isTunable: Boolean = tunable != Tunable.none
+
+    def toDuration: Duration = tunable() match {
+      case Some(d) => d
+      case None => duration
+    }
+  }
 }

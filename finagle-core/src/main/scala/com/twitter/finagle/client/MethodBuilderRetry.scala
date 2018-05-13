@@ -1,17 +1,15 @@
 package com.twitter.finagle.client
 
-import com.twitter.finagle.{Filter, param}
+import com.twitter.finagle.{Filter, Service, param}
 import com.twitter.finagle.service.{RequeueFilter, _}
-import com.twitter.finagle.stats.{BlacklistStatsReceiver, ExceptionStatsHandler, StatsReceiver}
-import com.twitter.util.{Throw, Try}
+import com.twitter.finagle.stats.{BlacklistStatsReceiver, StatsReceiver}
+import com.twitter.logging.{Level, Logger}
+import com.twitter.util.{Future, Stopwatch, Throw, Try}
 
 /**
- * '''Experimental:''' This API is under construction.
- *
  * @see [[MethodBuilderScaladoc]]
  */
-private[finagle] class MethodBuilderRetry[Req, Rep] private[client] (
-    mb: MethodBuilder[Req, Rep]) {
+private[finagle] class MethodBuilderRetry[Req, Rep] private[client] (mb: MethodBuilder[Req, Rep]) {
 
   import MethodBuilderRetry._
 
@@ -45,7 +43,8 @@ private[finagle] class MethodBuilderRetry[Req, Rep] private[client] (
             withoutRequeues,
             mb.params[param.HighResTimer].timer,
             scopedStats,
-            mb.params[Retries.Budget].retryBudget)
+            mb.params[Retries.Budget].retryBudget
+          )
         }
       }
     }
@@ -55,8 +54,30 @@ private[finagle] class MethodBuilderRetry[Req, Rep] private[client] (
     StatsFilter.typeAgnostic(
       new BlacklistStatsReceiver(stats.scope(LogicalScope), LogicalStatsBlacklistFn),
       mb.config.retry.responseClassifier,
-      ExceptionStatsHandler.Null,
-      mb.params[StatsFilter.Param].unit)
+      mb.params[param.ExceptionStatsHandler].categorizer,
+      mb.params[StatsFilter.Param].unit
+    )
+
+  private[client] def logFailuresFilter(
+    clientName: String,
+    methodName: Option[String]
+  ): Filter.TypeAgnostic = new Filter.TypeAgnostic {
+    def toFilter[Req1, Rep1]: Filter[Req1, Rep1, Req1, Rep1] = {
+      val loggerPrefix = "com.twitter.finagle.client.MethodBuilder"
+      val (label, loggerName) = methodName match {
+        case Some(methodName) =>
+          (s"$clientName/$methodName", s"$loggerPrefix.$clientName.$methodName")
+        case None =>
+          (clientName, s"$loggerPrefix.$clientName")
+      }
+      new LogFailuresFilter[Req1, Rep1](
+        Logger.get(loggerName),
+        label,
+        mb.config.retry.responseClassifier,
+        Stopwatch.systemMillis
+      )
+    }
+  }
 
   private[client] def registryEntries: Iterable[(Seq[String], String)] = {
     Seq(
@@ -90,7 +111,8 @@ private[client] object MethodBuilderRetry {
   ): RetryPolicy[(Req, Try[Rep])] =
     RetryPolicy.tries(
       MethodBuilderRetry.MaxRetries + 1, // add 1 for the initial request
-      shouldRetry)
+      shouldRetry
+    )
 
   private def isDefined(retryPolicy: RetryPolicy[_]): Boolean =
     retryPolicy != RetryPolicy.none
@@ -108,14 +130,58 @@ private[client] object MethodBuilderRetry {
         case _ => true
       }
 
+  private[client] class LogFailuresFilter[Req, Rep](
+      logger: Logger,
+      label: String,
+      responseClassifier: ResponseClassifier,
+      nowMs: () => Long)
+    extends Filter[Req, Rep, Req, Rep] {
+
+    def apply(request: Req, service: Service[Req, Rep]): Future[Rep] = {
+      val start = nowMs()
+      service(request).respond { response =>
+        val reqRep = ReqRep(request, response)
+        responseClassifier.applyOrElse(reqRep, ResponseClassifier.Default) match {
+          case ResponseClass.Failed(_) => log(start, request, response)
+          case _ => // don't log successful responses
+        }
+      }
+    }
+
+    private[this] def log(startMs: Long, request: Req, response: Try[Rep]): Unit = {
+      if (logger.isLoggable(Level.DEBUG)) {
+        val elapsedMs = nowMs() - startMs
+        val exception = response match {
+          case Throw(e) => e
+          case _ => null // note: nulls are allowed/ignored in this logging API
+        }
+        val msg = s"Request failed for $label, elapsed=$elapsedMs ms"
+        if (logger.isLoggable(Level.TRACE)) {
+          logger.trace(exception, s"$msg (request=$request, response=$response)")
+        } else {
+          logger.debug(exception, msg)
+        }
+      }
+    }
+  }
+
   /** The stats scope used for logical success rate. */
   private val LogicalScope = "logical"
 
   // the `StatsReceiver` used is already scoped to `$clientName/$methodName/logical`.
-  // this omits the pending gauge as well as failures/sourcedfailures details.
+  // this omits the pending gauge as well as sourcedfailures details.
   private val LogicalStatsBlacklistFn: Seq[String] => Boolean = { segments =>
     val head = segments.head
-    head == "pending" || head == "failures" || head == "sourcedfailures"
+    if (head == "pending" || head == "sourcedfailures") {
+      true
+    } else if (head == "failures" && segments.size == 1) {
+      // only filter out the failures rollup while keeping the exception
+      // details that are scoped via `ExceptionStatsHandler` to
+      // $clientName/$methodName/logical/failures/<exception_name>
+      true
+    } else {
+      false
+    }
   }
 
   /**

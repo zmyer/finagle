@@ -4,6 +4,7 @@ import com.twitter.finagle.Service
 import com.twitter.finagle.http.{Method, Request, Response, Version}
 import com.twitter.logging.{BareFormatter, Logger, StringHandler}
 import com.twitter.util.{Await, Future, Time}
+import java.time.ZonedDateTime
 import org.junit.runner.RunWith
 import org.scalatest.FunSuite
 import org.scalatest.junit.JUnitRunner
@@ -21,8 +22,8 @@ class LoggingFilterTest extends FunSuite {
     val request = Request("/search.json")
     request.method = Method.Get
     request.xForwardedFor = "10.0.0.1"
-    request.referer       = "http://www.example.com/"
-    request.userAgent     = "User Agent"
+    request.referer = "http://www.example.com/"
+    request.userAgent = "User Agent"
     request.version = Version.Http11
 
     val formatter = new CommonLogFormatter
@@ -46,7 +47,7 @@ class LoggingFilterTest extends FunSuite {
   val UnescapedEscaped =
     Seq(
       // boundaries
-      ("",        ""),
+      ("", ""),
       ("hello\n", "hello\\n"),
       ("\nhello", "\\nhello"),
       // low ascii and special characters
@@ -84,7 +85,7 @@ class LoggingFilterTest extends FunSuite {
       ("\u001f", "\\x1f"),
       ("\u0020", " "),
       ("\u0021", "!"),
-      ("\"",     "\\\""),
+      ("\"", "\\\""),
       ("\u0023", "#"),
       ("\u0024", "$"),
       ("\u0025", "%"),
@@ -142,7 +143,7 @@ class LoggingFilterTest extends FunSuite {
       ("\u0059", "Y"),
       ("\u005a", "Z"),
       ("\u005b", "["),
-      ("\\",     "\\\\"),
+      ("\\", "\\\\"),
       ("\u005d", "]"),
       ("\u005e", "^"),
       ("\u005f", "_"),
@@ -184,8 +185,16 @@ class LoggingFilterTest extends FunSuite {
     )
 
   test("escape() escapes non-printable, non-ASCII") {
-    UnescapedEscaped.foreach { case (input, escaped) =>
-      assert(LogFormatter.escape(input) == escaped)
+    UnescapedEscaped.foreach {
+      case (input, escaped) =>
+        assert(LogFormatter.escape(input) == escaped)
     }
   }
+
+  test("DateFormat keeps consistent") {
+    val logFormatter = new CommonLogFormatter
+    val timeGMT: ZonedDateTime = ZonedDateTime.parse("2012-06-30T12:30:40Z[GMT]")
+    assert(timeGMT.format(logFormatter.DateFormat) == "30/Jun/2012:12:30:40 +0000")
+  }
+
 }

@@ -3,12 +3,13 @@ package com.twitter.finagle.loadbalancer
 import com.twitter.conversions.time._
 import com.twitter.finagle.loadbalancer.aperture.{ApertureLeastLoaded, AperturePeakEwma}
 import com.twitter.finagle.loadbalancer.heap.HeapLeastLoaded
-import com.twitter.finagle.loadbalancer.p2c.{P2CPeakEwma, P2CLeastLoaded}
+import com.twitter.finagle.loadbalancer.p2c.{P2CLeastLoaded, P2CPeakEwma}
 import com.twitter.finagle.loadbalancer.roundrobin.RoundRobinBalancer
+import com.twitter.finagle.{param, Stack}
 import com.twitter.finagle.stats.StatsReceiver
 import com.twitter.finagle.util.Rng
 import com.twitter.finagle.{ServiceFactory, ServiceFactoryProxy, NoBrokersAvailableException}
-import com.twitter.util.{Activity, Duration, Future, Time}
+import com.twitter.util.{Activity, Duration, Future, Time, Stopwatch}
 import scala.util.Random
 
 /**
@@ -85,12 +86,13 @@ object Balancers {
   ): LoadBalancerFactory = new LoadBalancerFactory {
     override def toString: String = "P2CLeastLoaded"
     def newBalancer[Req, Rep](
-      endpoints: Activity[IndexedSeq[ServiceFactory[Req, Rep]]],
-      sr: StatsReceiver,
-      exc: NoBrokersAvailableException
-    ): ServiceFactory[Req, Rep] =
-      newScopedBal(sr, "p2c_least_loaded",
-        new P2CLeastLoaded(endpoints, maxEffort, rng, sr, exc))
+      endpoints: Activity[IndexedSeq[EndpointFactory[Req, Rep]]],
+      exc: NoBrokersAvailableException,
+      params: Stack.Params
+    ): ServiceFactory[Req, Rep] = {
+      val sr = params[param.Stats].statsReceiver
+      newScopedBal(sr, "p2c_least_loaded", new P2CLeastLoaded(endpoints, maxEffort, rng, sr, exc))
+    }
   }
 
   /**
@@ -126,12 +128,17 @@ object Balancers {
   ): LoadBalancerFactory = new LoadBalancerFactory {
     override def toString: String = "P2CPeakEwma"
     def newBalancer[Req, Rep](
-      endpoints: Activity[IndexedSeq[ServiceFactory[Req, Rep]]],
-      sr: StatsReceiver,
-      exc: NoBrokersAvailableException
-    ): ServiceFactory[Req, Rep] =
-      newScopedBal(sr, "p2c_peak_ewma",
-        new P2CPeakEwma(endpoints, decayTime, maxEffort, rng, sr, exc))
+      endpoints: Activity[IndexedSeq[EndpointFactory[Req, Rep]]],
+      exc: NoBrokersAvailableException,
+      params: Stack.Params
+    ): ServiceFactory[Req, Rep] = {
+      val sr = params[param.Stats].statsReceiver
+      newScopedBal(
+        sr,
+        "p2c_peak_ewma",
+        new P2CPeakEwma(endpoints, decayTime, Stopwatch.systemNanos, maxEffort, rng, sr, exc)
+      )
+    }
   }
 
   /**
@@ -145,12 +152,12 @@ object Balancers {
     new LoadBalancerFactory {
       override def toString: String = "HeapLeastLoaded"
       def newBalancer[Req, Rep](
-        endpoints: Activity[IndexedSeq[ServiceFactory[Req, Rep]]],
-        sr: StatsReceiver,
-        exc: NoBrokersAvailableException
+        endpoints: Activity[IndexedSeq[EndpointFactory[Req, Rep]]],
+        exc: NoBrokersAvailableException,
+        params: Stack.Params
       ): ServiceFactory[Req, Rep] = {
-        newScopedBal(sr, "heap_least_loaded",
-          new HeapLeastLoaded(endpoints, sr, exc, rng))
+        val sr = params[param.Stats].statsReceiver
+        newScopedBal(sr, "heap_least_loaded", new HeapLeastLoaded(endpoints, sr, exc, rng))
       }
     }
 
@@ -159,12 +166,10 @@ object Balancers {
    * services so that the concurrent load to each service, measured over a window specified
    * by `smoothWin`, stays within the load band delimited by `lowLoad` and `highLoad`.
    *
-   * For example, if the load band is [0.5, 2], the aperture will be adjusted so that no
-   * service inside the aperture has a load less than 0.5 or more than 2, so long as
-   * offered load (or concurrency) permits it.
-   *
-   * The default load band, [0.5, 2], matches closely the load distribution
-   * given by least-loaded without any aperture windowing.
+   * The default load band configuration attempts to create a 1:1 relationship between
+   * a client's offered load and the aperture size. Given a homogeneous replica set – this
+   * optimizes for at least one concurrent request per node and gives the balancer
+   * sufficient data to compare load across nodes.
    *
    * Among the benefits of aperture balancing are:
    *
@@ -206,32 +211,49 @@ object Balancers {
    * deterministic tests.
    *
    * @param useDeterministicOrdering Enables the aperture instance to make use of
-   * the coordinate in [[DeterministicOrdering]] to calculate an order for the
-   * endpoints. In short, this allows coordination for apertures across process
-   * boundaries to avoid load concentration when deployed in a distributed system.
-   * See [[DeterministicOrdering]] for more details.
+   * the coordinate in [[com.twitter.finagle.loadbalancer.aperture.ProcessCoordinate]] to
+   * calculate an order for the endpoints. In short, this allows coordination for apertures
+   * across process boundaries to avoid load concentration when deployed in a distributed system.
    *
    * @see The [[https://twitter.github.io/finagle/guide/Clients.html#aperture-least-loaded user guide]]
    * for more details.
    */
   def aperture(
-    smoothWin: Duration = 5.seconds,
-    lowLoad: Double = 0.5,
-    highLoad: Double = 2.0,
+    smoothWin: Duration = 15.seconds,
+    lowLoad: Double = 0.875,
+    highLoad: Double = 1.125,
     minAperture: Int = 1,
     maxEffort: Int = MaxEffort,
     rng: Rng = Rng.threadLocal,
-    useDeterministicOrdering: Boolean = false
+    useDeterministicOrdering: Option[Boolean] = None
   ): LoadBalancerFactory = new LoadBalancerFactory {
     override def toString: String = "ApertureLeastLoaded"
     def newBalancer[Req, Rep](
-      endpoints: Activity[IndexedSeq[ServiceFactory[Req, Rep]]],
-      sr: StatsReceiver,
-      exc: NoBrokersAvailableException
+      endpoints: Activity[IndexedSeq[EndpointFactory[Req, Rep]]],
+      exc: NoBrokersAvailableException,
+      params: Stack.Params
     ): ServiceFactory[Req, Rep] = {
-      newScopedBal(sr, "aperture_least_loaded",
-        new ApertureLeastLoaded(endpoints, smoothWin, lowLoad,
-          highLoad, minAperture, maxEffort, rng, sr, exc, useDeterministicOrdering))
+      val sr = params[param.Stats].statsReceiver
+      val timer = params[param.Timer].timer
+      val label = params[param.Label].label
+      newScopedBal(
+        sr,
+        "aperture_least_loaded",
+        new ApertureLeastLoaded(
+          endpoints,
+          smoothWin,
+          lowLoad,
+          highLoad,
+          minAperture,
+          maxEffort,
+          rng,
+          sr,
+          label,
+          timer,
+          exc,
+          useDeterministicOrdering
+        )
+      )
     }
   }
 
@@ -278,32 +300,51 @@ object Balancers {
    * deterministic tests.
    *
    * @param useDeterministicOrdering Enables the aperture instance to make use of
-   * the coordinate in [[DeterministicOrdering]] to calculate an order for the
-   * endpoints. In short, this allows coordination for apertures across process
-   * boundaries to avoid load concentration when deployed in a distributed system.
-   * See [[DeterministicOrdering]] for more details.
+   * the coordinate in [[com.twitter.finagle.loadbalancer.aperture.ProcessCoordinate]] to
+   * calculate an order for the endpoints. In short, this allows coordination for apertures
+   * across process boundaries to avoid load concentration when deployed in a distributed system.
    *
    * @see The [[https://twitter.github.io/finagle/guide/Clients.html#aperture-least-loaded user guide]]
    * for more details.
    */
   def aperturePeakEwma(
     smoothWin: Duration = 15.seconds,
-    lowLoad: Double = 0.5,
-    highLoad: Double = 2.0,
+    lowLoad: Double = 0.875,
+    highLoad: Double = 1.125,
     minAperture: Int = 1,
     maxEffort: Int = MaxEffort,
     rng: Rng = Rng.threadLocal,
-    useDeterministicOrdering: Boolean = false
+    useDeterministicOrdering: Option[Boolean] = None
   ): LoadBalancerFactory = new LoadBalancerFactory {
     override def toString: String = "AperturePeakEwma"
     def newBalancer[Req, Rep](
-      endpoints: Activity[IndexedSeq[ServiceFactory[Req, Rep]]],
-      sr: StatsReceiver,
-      exc: NoBrokersAvailableException
+      endpoints: Activity[IndexedSeq[EndpointFactory[Req, Rep]]],
+      exc: NoBrokersAvailableException,
+      params: Stack.Params
     ): ServiceFactory[Req, Rep] = {
-      newScopedBal(sr, "aperture_peak_ewma",
-        new AperturePeakEwma(endpoints, smoothWin, smoothWin, lowLoad,
-          highLoad, minAperture, maxEffort, rng, sr, exc, useDeterministicOrdering))
+      val sr = params[param.Stats].statsReceiver
+      val timer = params[param.Timer].timer
+      val label = params[param.Label].label
+      newScopedBal(
+        sr,
+        "aperture_peak_ewma",
+        new AperturePeakEwma(
+          endpoints,
+          smoothWin,
+          smoothWin,
+          Stopwatch.systemNanos,
+          lowLoad,
+          highLoad,
+          minAperture,
+          maxEffort,
+          rng,
+          sr,
+          label,
+          timer,
+          exc,
+          useDeterministicOrdering
+        )
+      )
     }
   }
 
@@ -325,11 +366,12 @@ object Balancers {
   ): LoadBalancerFactory = new LoadBalancerFactory {
     override def toString: String = "RoundRobin"
     def newBalancer[Req, Rep](
-      endpoints: Activity[IndexedSeq[ServiceFactory[Req, Rep]]],
-      sr: StatsReceiver,
-      exc: NoBrokersAvailableException
+      endpoints: Activity[IndexedSeq[EndpointFactory[Req, Rep]]],
+      exc: NoBrokersAvailableException,
+      params: Stack.Params
     ): ServiceFactory[Req, Rep] = {
-      newScopedBal(sr, "round_robin", new RoundRobinBalancer(endpoints, sr, exc))
+      val sr = params[param.Stats].statsReceiver
+      newScopedBal(sr, "round_robin", new RoundRobinBalancer(endpoints, sr, exc, maxEffort))
     }
   }
 }

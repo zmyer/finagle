@@ -1,7 +1,7 @@
 package com.twitter.finagle.netty4.codec
 
 import com.twitter.finagle.Failure
-import com.twitter.finagle.netty4.ByteBufAsBuf
+import com.twitter.finagle.netty4.ByteBufConversion
 import com.twitter.io.Buf
 import io.netty.buffer.{ByteBuf, Unpooled}
 import io.netty.channel.{ChannelDuplexHandler, ChannelHandlerContext, ChannelPromise}
@@ -9,6 +9,9 @@ import io.netty.channel.ChannelHandler.Sharable
 
 /**
  * A ByteBuffer <-> Buf codec.
+ *
+ * @note this handler guarantees to only emit instances of [[Buf.ByteArray]]
+ *       as well as to release the inbound [[ByteBuf]].
  *
  * @note this is intended to be installed after framing in a Finagle
  * protocol implementation such that the `In` and `Out` types for the
@@ -19,10 +22,6 @@ private[finagle] object BufCodec extends ChannelDuplexHandler {
 
   override def write(ctx: ChannelHandlerContext, msg: Any, p: ChannelPromise): Unit =
     msg match {
-      // We bypass N4 byte buffers if they're already direct.
-      case buf: ByteBufAsBuf if buf.underlying.isDirect =>
-        ctx.write(buf.underlying, p)
-
       // We bypass Java NIO byte buffers if they're already direct.
       case Buf.ByteBuffer(buf) if buf.isDirect =>
         ctx.write(Unpooled.wrappedBuffer(buf), p)
@@ -50,14 +49,24 @@ private[finagle] object BufCodec extends ChannelDuplexHandler {
 
         ctx.write(byteBuf, p)
 
-      case typ => p.setFailure(Failure(
-        s"unexpected type ${typ.getClass.getSimpleName} when encoding to ByteBuf"))
+      case typ =>
+        p.setFailure(
+          Failure(s"unexpected type ${typ.getClass.getSimpleName} when encoding to ByteBuf")
+        )
     }
 
   override def channelRead(ctx: ChannelHandlerContext, msg: Any): Unit =
     msg match {
-      case bb: ByteBuf => ctx.fireChannelRead(ByteBufAsBuf.Owned(bb))
-      case typ => ctx.fireExceptionCaught(Failure(
-          s"unexpected type ${typ.getClass.getSimpleName} when encoding to Buf"))
+      case bb: ByteBuf =>
+        val result =
+          try ByteBufConversion.copyByteBufToBuf(bb)
+          finally bb.release()
+
+        ctx.fireChannelRead(result)
+
+      case typ =>
+        ctx.fireExceptionCaught(
+          Failure(s"unexpected type ${typ.getClass.getSimpleName} when encoding to Buf")
+        )
     }
 }

@@ -25,7 +25,7 @@ object TimeoutFilter {
    * A class eligible for configuring a [[com.twitter.finagle.Stackable]]
    * [[com.twitter.finagle.service.TimeoutFilter]] module.
    */
- class Param private[twitter](val tunableTimeout: Tunable[Duration]) {
+  class Param private[twitter] (val tunableTimeout: Tunable[Duration]) {
 
     def this(timeout: Duration) =
       this(Tunable.const(role.name, timeout))
@@ -63,7 +63,7 @@ object TimeoutFilter {
    * [[com.twitter.finagle.service.TimeoutFilter]] module when used for
    * a total timeout of a logical request, including retries.
    */
-  private[finagle] class TotalTimeout private[twitter](val tunableTimeout: Tunable[Duration]) {
+  private[finagle] class TotalTimeout private[twitter] (val tunableTimeout: Tunable[Duration]) {
 
     def this(timeout: Duration) =
       this(Tunable.const(role.name, timeout))
@@ -80,6 +80,9 @@ object TimeoutFilter {
   private[finagle] object TotalTimeout {
     def apply(timeout: Duration): TotalTimeout =
       new TotalTimeout(timeout)
+
+    def apply(tunableTimeout: Tunable[Duration]): TotalTimeout =
+      new TotalTimeout(tunableTimeout)
 
     private[finagle] val Default = Duration.Top
 
@@ -128,10 +131,11 @@ object TimeoutFilter {
    */
   def clientModule[Req, Rep]: Stackable[ServiceFactory[Req, Rep]] =
     new Stack.Module3[
-        TimeoutFilter.Param,
-        param.Timer,
-        LatencyCompensation.Compensation,
-        ServiceFactory[Req, Rep]] {
+      TimeoutFilter.Param,
+      param.Timer,
+      LatencyCompensation.Compensation,
+      ServiceFactory[Req, Rep]
+    ] {
       val role: Stack.Role = TimeoutFilter.role
       val description: String =
         "Apply a timeout-derived deadline to requests; adjust existing deadlines."
@@ -148,7 +152,8 @@ object TimeoutFilter {
           compensation.howlong,
           timeout => new IndividualRequestTimeoutException(timeout),
           timerParam.timer,
-          next)
+          next
+        )
     }
 
   /**
@@ -156,10 +161,7 @@ object TimeoutFilter {
    * for use in servers.
    */
   def serverModule[Req, Rep]: Stackable[ServiceFactory[Req, Rep]] =
-    new Stack.Module2[
-        TimeoutFilter.Param,
-        param.Timer,
-        ServiceFactory[Req, Rep]] {
+    new Stack.Module2[TimeoutFilter.Param, param.Timer, ServiceFactory[Req, Rep]] {
       val role: Stack.Role = TimeoutFilter.role
       val description: String =
         "Apply a timeout-derived deadline to requests; adjust existing deadlines."
@@ -174,7 +176,8 @@ object TimeoutFilter {
           Duration.Zero,
           timeout => new IndividualRequestTimeoutException(timeout),
           timerParam.timer,
-          next)
+          next
+        )
     }
 
   def typeAgnostic(
@@ -189,9 +192,10 @@ object TimeoutFilter {
     exceptionFn: Duration => RequestTimeoutException,
     timer: Timer
   ): TypeAgnostic = {
-    val timeoutFn: () => Duration = () => timeoutTunable() match {
-      case Some(duration) => duration
-      case None => TimeoutFilter.Param.Default
+    val timeoutFn: () => Duration = () =>
+      timeoutTunable() match {
+        case Some(duration) => duration
+        case None => TimeoutFilter.Param.Default
     }
     typeAgnostic(timeoutFn, exceptionFn, timer)
   }
@@ -202,10 +206,7 @@ object TimeoutFilter {
     timer: Timer
   ): TypeAgnostic = new TypeAgnostic {
     def toFilter[Req, Rep]: Filter[Req, Rep, Req, Rep] =
-      new TimeoutFilter[Req, Rep](
-        timeoutFn,
-        exceptionFn,
-        timer)
+      new TimeoutFilter[Req, Rep](timeoutFn, exceptionFn, timer)
   }
 
 }
@@ -226,10 +227,17 @@ object TimeoutFilter {
  *      in the user guide for more details.
  */
 class TimeoutFilter[Req, Rep](
-    timeoutFn: () => Duration,
+  timeoutFn: () => Duration,
+  exceptionFn: Duration => RequestTimeoutException,
+  timer: Timer
+) extends SimpleFilter[Req, Rep] {
+
+  def this(
+    timeout: Tunable[Duration],
     exceptionFn: Duration => RequestTimeoutException,
-    timer: Timer)
-  extends SimpleFilter[Req, Rep] {
+    timer: Timer
+  ) =
+    this(() => timeout().getOrElse(TimeoutFilter.Param.Default), exceptionFn, timer)
 
   def this(timeout: Duration, exception: RequestTimeoutException, timer: Timer) =
     this(() => timeout, _ => exception, timer)

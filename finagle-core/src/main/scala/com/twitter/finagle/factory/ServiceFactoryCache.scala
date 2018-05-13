@@ -14,9 +14,8 @@ import scala.collection.mutable.ListBuffer
  * A service factory that keeps track of idling times to implement
  * cache eviction.
  */
-private class IdlingFactory[Req, Rep](
-    self: ServiceFactory[Req, Rep])
-  extends ServiceFactoryProxy[Req, Rep](self) {
+private class IdlingFactory[Req, Rep](self: ServiceFactory[Req, Rep])
+    extends ServiceFactoryProxy[Req, Rep](self) {
   @volatile private[this] var watch = Stopwatch.start()
   private[this] val n = new AtomicInteger(0)
 
@@ -71,13 +70,13 @@ private class IdlingFactory[Req, Rep](
  * for up to (TTI * 2) minutes, with the caveat that we never expire
  * the last, least-idle entry.
  */
-private[finagle] class ServiceFactoryCache[Key, Req, Rep](
-    newFactory: Key => ServiceFactory[Req, Rep],
-    timer: Timer,
-    statsReceiver: StatsReceiver = NullStatsReceiver,
-    maxCacheSize: Int = 8,
-    tti: Duration = 10.minutes)
-  extends Closable {
+class ServiceFactoryCache[Key, Req, Rep](
+  newFactory: Key => ServiceFactory[Req, Rep],
+  timer: Timer,
+  statsReceiver: StatsReceiver = NullStatsReceiver,
+  maxCacheSize: Int = 8,
+  tti: Duration = 10.minutes
+) extends Closable {
   assert(maxCacheSize > 0)
 
   private[this] val cache = new util.HashMap[Key, IdlingFactory[Req, Rep]]()
@@ -103,9 +102,10 @@ private[finagle] class ServiceFactoryCache[Key, Req, Rep](
         } else {
           expired
         }
-        evictees.foreach { case (key, _) =>
-          val removed = cache.remove(key)
-          removed.close()
+        evictees.foreach {
+          case (key, _) =>
+            val removed = cache.remove(key)
+            removed.close()
         }
         nexpires.incr(evictees.size)
       }
@@ -229,13 +229,7 @@ private[finagle] class ServiceFactoryCache[Key, Req, Rep](
     Closable.all(closables: _*).close(deadline)
   }
 
-  private[this] val svcFacStatusFn: ServiceFactory[Req, Rep] => Status =
-    svcFac => svcFac.status
-
-  def status: Status =
-    Status.bestOf(cache.values.asScala, svcFacStatusFn)
-
-  def status(key: Key): Status = {
+  private[finagle] def status(key: Key): Status = {
     val readStamp = lock.readLock()
     try {
       val svcFac = cache.get(key)

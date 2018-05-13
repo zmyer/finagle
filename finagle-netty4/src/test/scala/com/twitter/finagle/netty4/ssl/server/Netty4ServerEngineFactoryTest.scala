@@ -16,8 +16,12 @@ class Netty4ServerEngineFactoryTest extends FunSuite {
   private[this] val factory = Netty4ServerEngineFactory(forceJdk = true)
 
   // deleteOnExit for these is handled by TempFile
-  private[this] val certFile = TempFile.fromResourcePath("/ssl/certs/test-rsa.crt")
-  private[this] val keyFile = TempFile.fromResourcePath("/ssl/keys/test-pkcs8.key")
+  private[this] val certFile = TempFile.fromResourcePath("/ssl/certs/svc-test-server.cert.pem")
+  private[this] val expiredCertFile = TempFile.fromResourcePath("/ssl/certs/svc-test-server-expired.cert.pem")
+  private[this] val keyFile = TempFile.fromResourcePath("/ssl/keys/svc-test-server-pkcs8.key.pem")
+
+  // This file contains multiple certificates
+  private[this] val chainFile = TempFile.fromResourcePath("/ssl/certs/svc-test-chain.cert.pem")
 
   private[this] val goodKeyCredentials = KeyCredentials.CertAndKey(certFile, keyFile)
 
@@ -46,24 +50,35 @@ class Netty4ServerEngineFactoryTest extends FunSuite {
     val keyCredentials = KeyCredentials.CertAndKey(tempCertFile, keyFile)
     val config = SslServerConfiguration(keyCredentials = keyCredentials)
 
-    intercept[IllegalArgumentException] {
-      val engine = factory(config)
-    }
-  }
-
-  test("config with cert, key, and chain fails") {
-    val keyCredentials = KeyCredentials.CertKeyAndChain(certFile, keyFile, certFile)
-    val config = SslServerConfiguration(keyCredentials = keyCredentials)
-
     intercept[SslConfigurationException] {
       val engine = factory(config)
     }
   }
 
+  test("config with expired cert and valid key credential fails") {
+    val keyCredentials = KeyCredentials.CertAndKey(expiredCertFile, keyFile)
+    val config = SslServerConfiguration(keyCredentials = keyCredentials)
+
+    intercept[SslConfigurationException] {
+      factory(config)
+    }
+  }
+
+  test("config with cert, key, and chain succeeds") {
+    val keyCredentials = KeyCredentials.CertKeyAndChain(certFile, keyFile, chainFile)
+    val config = SslServerConfiguration(keyCredentials = keyCredentials)
+
+    val engine = factory(config)
+    val sslEngine = engine.self
+
+    assert(sslEngine != null)
+  }
+
   test("config with insecure trust credentials succeeds") {
     val config = SslServerConfiguration(
       keyCredentials = goodKeyCredentials,
-      trustCredentials = TrustCredentials.Insecure)
+      trustCredentials = TrustCredentials.Insecure
+    )
     val engine = factory(config)
     val sslEngine = engine.self
 
@@ -71,10 +86,11 @@ class Netty4ServerEngineFactoryTest extends FunSuite {
   }
 
   test("config with good trusted cert collection succeeds") {
-    val trustCredentials = TrustCredentials.CertCollection(certFile)
+    val trustCredentials = TrustCredentials.CertCollection(chainFile)
     val config = SslServerConfiguration(
       keyCredentials = goodKeyCredentials,
-      trustCredentials = trustCredentials)
+      trustCredentials = trustCredentials
+    )
     val engine = factory(config)
     val sslEngine = engine.self
 
@@ -88,7 +104,8 @@ class Netty4ServerEngineFactoryTest extends FunSuite {
     val trustCredentials = TrustCredentials.CertCollection(tempCertFile)
     val config = SslServerConfiguration(
       keyCredentials = goodKeyCredentials,
-      trustCredentials = trustCredentials)
+      trustCredentials = trustCredentials
+    )
 
     intercept[IllegalArgumentException] {
       val engine = factory(config)
@@ -97,9 +114,8 @@ class Netty4ServerEngineFactoryTest extends FunSuite {
 
   test("config with good cipher suites succeeds") {
     val cipherSuites = CipherSuites.Enabled(Seq("TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384"))
-    val config = SslServerConfiguration(
-      keyCredentials = goodKeyCredentials,
-      cipherSuites = cipherSuites)
+    val config =
+      SslServerConfiguration(keyCredentials = goodKeyCredentials, cipherSuites = cipherSuites)
     val engine = factory(config)
     val sslEngine = engine.self
 
@@ -111,9 +127,8 @@ class Netty4ServerEngineFactoryTest extends FunSuite {
 
   test("config with bad cipher suites fails") {
     val cipherSuites = CipherSuites.Enabled(Seq("TLS_ECDHE_ECDSA_WITH_AES_102_CBC_SHA496"))
-    val config = SslServerConfiguration(
-      keyCredentials = goodKeyCredentials,
-      cipherSuites = cipherSuites)
+    val config =
+      SslServerConfiguration(keyCredentials = goodKeyCredentials, cipherSuites = cipherSuites)
 
     intercept[IllegalArgumentException] {
       val engine = factory(config)
@@ -122,9 +137,7 @@ class Netty4ServerEngineFactoryTest extends FunSuite {
 
   test("config with good enabled protocols succeeds") {
     val protocols = Protocols.Enabled(Seq("TLSv1.2"))
-    val config = SslServerConfiguration(
-      keyCredentials = goodKeyCredentials,
-      protocols = protocols)
+    val config = SslServerConfiguration(keyCredentials = goodKeyCredentials, protocols = protocols)
     val engine = factory(config)
     val sslEngine = engine.self
 
@@ -136,9 +149,7 @@ class Netty4ServerEngineFactoryTest extends FunSuite {
 
   test("config with bad enabled protocols fails") {
     val protocols = Protocols.Enabled(Seq("TLSv2.0"))
-    val config = SslServerConfiguration(
-      keyCredentials = goodKeyCredentials,
-      protocols = protocols)
+    val config = SslServerConfiguration(keyCredentials = goodKeyCredentials, protocols = protocols)
 
     intercept[IllegalArgumentException] {
       val engine = factory(config)
@@ -152,7 +163,8 @@ class Netty4ServerEngineFactoryTest extends FunSuite {
     val appProtocols = ApplicationProtocols.Supported(Seq("h2"))
     val config = SslServerConfiguration(
       keyCredentials = goodKeyCredentials,
-      applicationProtocols = appProtocols)
+      applicationProtocols = appProtocols
+    )
 
     intercept[UnsupportedOperationException] {
       val engine = factory(config)
@@ -160,9 +172,8 @@ class Netty4ServerEngineFactoryTest extends FunSuite {
   }
 
   test("config with client auth Off succeeds") {
-    val config = SslServerConfiguration(
-      keyCredentials = goodKeyCredentials,
-      clientAuth = ClientAuth.Off)
+    val config =
+      SslServerConfiguration(keyCredentials = goodKeyCredentials, clientAuth = ClientAuth.Off)
     val engine = factory(config)
     val sslEngine = engine.self
 
@@ -172,9 +183,8 @@ class Netty4ServerEngineFactoryTest extends FunSuite {
   }
 
   test("config with client auth Wanted succeeds") {
-    val config = SslServerConfiguration(
-      keyCredentials = goodKeyCredentials,
-      clientAuth = ClientAuth.Wanted)
+    val config =
+      SslServerConfiguration(keyCredentials = goodKeyCredentials, clientAuth = ClientAuth.Wanted)
     val engine = factory(config)
     val sslEngine = engine.self
 
@@ -184,9 +194,8 @@ class Netty4ServerEngineFactoryTest extends FunSuite {
   }
 
   test("config with client auth Needed succeeds") {
-    val config = SslServerConfiguration(
-      keyCredentials = goodKeyCredentials,
-      clientAuth = ClientAuth.Needed)
+    val config =
+      SslServerConfiguration(keyCredentials = goodKeyCredentials, clientAuth = ClientAuth.Needed)
     val engine = factory(config)
     val sslEngine = engine.self
 

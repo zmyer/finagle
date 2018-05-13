@@ -2,7 +2,11 @@ package com.twitter.finagle.service
 
 import com.twitter.finagle.Filter.TypeAgnostic
 import com.twitter.finagle._
-import com.twitter.finagle.stats.{ExceptionStatsHandler, MultiCategorizingExceptionStatsHandler, StatsReceiver}
+import com.twitter.finagle.stats.{
+  ExceptionStatsHandler,
+  MultiCategorizingExceptionStatsHandler,
+  StatsReceiver
+}
 import com.twitter.util._
 import java.util.concurrent.atomic.LongAdder
 import java.util.concurrent.TimeUnit
@@ -55,8 +59,9 @@ object StatsFilter {
 
   /** Basic categorizer with all exceptions under 'failures'. */
   val DefaultExceptions = new MultiCategorizingExceptionStatsHandler(
-    mkFlags = Failure.flagsOf,
-    mkSource = SourcedException.unapply) {
+    mkFlags = FailureFlags.flagsOf,
+    mkSource = SourcedException.unapply
+  ) {
 
     override def toString: String = "DefaultCategorizer"
   }
@@ -67,8 +72,13 @@ object StatsFilter {
   def typeAgnostic(
     statsReceiver: StatsReceiver,
     exceptionStatsHandler: ExceptionStatsHandler
-  ): TypeAgnostic = typeAgnostic(
-    statsReceiver, ResponseClassifier.Default, exceptionStatsHandler, TimeUnit.MILLISECONDS)
+  ): TypeAgnostic =
+    typeAgnostic(
+      statsReceiver,
+      ResponseClassifier.Default,
+      exceptionStatsHandler,
+      TimeUnit.MILLISECONDS
+    )
 
   def typeAgnostic(
     statsReceiver: StatsReceiver,
@@ -77,8 +87,7 @@ object StatsFilter {
     timeUnit: TimeUnit
   ): TypeAgnostic = new TypeAgnostic {
     def toFilter[Req, Rep]: Filter[Req, Rep, Req, Rep] =
-      new StatsFilter[Req, Rep](
-        statsReceiver, responseClassifier, exceptionStatsHandler, timeUnit)
+      new StatsFilter[Req, Rep](statsReceiver, responseClassifier, exceptionStatsHandler, timeUnit)
   }
 
 }
@@ -105,12 +114,11 @@ object StatsFilter {
  * request failures.
  */
 class StatsFilter[Req, Rep](
-    statsReceiver: StatsReceiver,
-    responseClassifier: ResponseClassifier,
-    exceptionStatsHandler: ExceptionStatsHandler,
-    timeUnit: TimeUnit)
-  extends SimpleFilter[Req, Rep]
-{
+  statsReceiver: StatsReceiver,
+  responseClassifier: ResponseClassifier,
+  exceptionStatsHandler: ExceptionStatsHandler,
+  timeUnit: TimeUnit
+) extends SimpleFilter[Req, Rep] {
   import StatsFilter.SyntheticException
 
   def this(
@@ -141,15 +149,10 @@ class StatsFilter[Req, Rep](
   private[this] val outstandingRequestCountGauge =
     statsReceiver.addGauge("pending") { outstandingRequestCount.sum() }
 
-  private[this] def isBlackholeResponse(rep: Try[Rep]): Boolean = rep match {
+  private[this] def isIgnorableResponse(rep: Try[Rep]): Boolean = rep match {
+    case Throw(f: FailureFlags[_]) if f.isFlagged(FailureFlags.Ignorable) =>
+      true
     case Throw(BackupRequestLost) | Throw(WriteException(BackupRequestLost)) =>
-      // We blackhole this request. It doesn't count for anything.
-      // After the Failure() patch, this should no longer need to
-      // be a special case.
-      //
-      // In theory, we should probably unwind the whole cause
-      // chain to look for a BackupRequestLost, but in practice it
-      // is wrapped only once.
       true
     case _ =>
       false
@@ -162,13 +165,14 @@ class StatsFilter[Req, Rep](
 
     val result = try {
       service(request)
-    } catch { case NonFatal(e) =>
-      Future.exception(e)
+    } catch {
+      case NonFatal(e) =>
+        Future.exception(e)
     }
 
     result.respond { response =>
       outstandingRequestCount.decrement()
-      if (!isBlackholeResponse(response)) {
+      if (!isIgnorableResponse(response)) {
         dispatchCount.incr()
         responseClassifier.applyOrElse(
           ReqRep(request, response),
@@ -209,10 +213,8 @@ private[finagle] object StatsServiceFactory {
     }
 }
 
-class StatsServiceFactory[Req, Rep](
-    factory: ServiceFactory[Req, Rep],
-    statsReceiver: StatsReceiver)
-  extends ServiceFactoryProxy[Req, Rep](factory) {
+class StatsServiceFactory[Req, Rep](factory: ServiceFactory[Req, Rep], statsReceiver: StatsReceiver)
+    extends ServiceFactoryProxy[Req, Rep](factory) {
   private[this] val availableGauge = statsReceiver.addGauge("available") {
     if (isAvailable) 1F else 0F
   }

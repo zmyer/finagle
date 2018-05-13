@@ -4,23 +4,21 @@ import com.twitter.concurrent.AsyncQueue
 import com.twitter.conversions.time._
 import com.twitter.finagle.liveness.FailureDetector
 import com.twitter.finagle.mux.transport.Message
+import com.twitter.finagle.mux.transport.Message.Tlease
 import com.twitter.finagle.stats.InMemoryStatsReceiver
 import com.twitter.finagle.transport.QueueTransport
-import com.twitter.finagle.{Failure, Dtab, Path, Status}
+import com.twitter.finagle.{Dtab, Failure, Path, Status}
 import com.twitter.io.Buf
 import com.twitter.util.{Await, Throw, Time}
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 private class ClientSessionTest extends FunSuite {
 
   private class Ctx {
     val clientToServer = new AsyncQueue[Message]
     val serverToClient = new AsyncQueue[Message]
 
-    val transport = new QueueTransport(writeq=clientToServer, readq=serverToClient)
+    val transport = new QueueTransport(writeq = clientToServer, readq = serverToClient)
 
     val stats = new InMemoryStatsReceiver
     val session = new ClientSession(transport, FailureDetector.NullConfig, "test", stats)
@@ -43,11 +41,15 @@ private class ClientSessionTest extends FunSuite {
 
       assert(transport.status == Status.Open)
       assert(session.status === Status.Open)
+      assert(session.currentLease == None)
       recv(Message.Tlease(1.millisecond))
+      assert(session.currentLease == Some(1.millisecond))
       ctl.advance(2.milliseconds)
       assert(session.status == Status.Busy)
       assert(transport.status == Status.Open)
+      assert(session.currentLease == Some(-1.millisecond))
       recv(Message.Tlease(Message.Tlease.MaxLease))
+      assert(session.currentLease == Some(Tlease.MaxLease))
       assert(session.status === Status.Open)
     }
   }

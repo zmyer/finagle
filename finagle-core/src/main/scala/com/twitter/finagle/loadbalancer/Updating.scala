@@ -1,6 +1,5 @@
 package com.twitter.finagle.loadbalancer
 
-import com.twitter.finagle.ServiceFactory
 import com.twitter.finagle.util.DefaultLogger
 import com.twitter.util.{Time, Activity, Future}
 import java.util.logging.Level
@@ -8,17 +7,18 @@ import scala.util.control.NonFatal
 
 /**
  * A Balancer mix-in which provides the collection over which to load balance
- * by observing `activity`.
+ * by observing `endpoints`.
  */
 private trait Updating[Req, Rep] extends Balancer[Req, Rep] {
+
   /**
-   * An activity representing the active set of ServiceFactories.
+   * An activity representing the active set of EndpointFactories.
    */
-  protected def endpoints: Activity[IndexedSeq[ServiceFactory[Req, Rep]]]
+  protected def endpoints: Activity[IndexedSeq[EndpointFactory[Req, Rep]]]
 
   /*
    * Subscribe to the Activity and dynamically update the load
-   * balancer as it (succesfully) changes.
+   * balancer as it (successfully) changes.
    *
    * The observation is terminated when the Balancer is closed.
    */
@@ -26,7 +26,8 @@ private trait Updating[Req, Rep] extends Balancer[Req, Rep] {
     case Activity.Ok(newList) =>
       // We log here for completeness. Since this happens out-of-band
       // of requests, the failures are not easily exposed.
-      try update(newList) catch {
+      try update(newList)
+      catch {
         case NonFatal(exc) =>
           DefaultLogger.log(Level.WARNING, "Failed to update balancer", exc)
       }

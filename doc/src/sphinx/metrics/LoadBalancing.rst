@@ -19,10 +19,14 @@ All Balancers
 **load**
   A gauge of the total load over all nodes being balanced across.
 
-**meanweight**
+**meanweight** `verbosity:debug`
   A gauge tracking the arithmetic mean of the weights of the endpoints
-  being load-balanced across. Does not apply to
-  :src:`HeapLeastLoaded <com/twitter/finagle/loadbalancer/heap/HeapLeastLoaded.scala>`.
+  being load-balanced across.
+
+**num_weight_classes**
+  The number of groups (or classes) of weights in the load balancer. Each class gets
+  a fresh instance of the client's load balancer and receives traffic proportional
+  to its weight.
 
 **adds**
   A counter of the number of hosts added to the loadbalancer.
@@ -50,21 +54,35 @@ All Balancers
 **algorithm/{type}**
   A gauge exported with the name of the algorithm used for load balancing.
 
-ApertureLoadBandBalancer
-<<<<<<<<<<<<<<<<<<<<<<<<
+Aperture Based Load Balancers
+<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
-**aperture**
-  A gauge of the width of the window over which endpoints are
-  load-balanced.
+**logical_aperture**
+  A gauge of the width of the window over which endpoints are load-balanced.
+  This is primarily an accounting mechanism and for a true representation of
+  the number of endpoints the client is talking to see `physical_aperture`.
 
-**coordinate**
-  The process global coordinate for the process as sampled by
-  the Aperture implementation.
+**physical_aperture**
+  When using deterministic aperture (i.e. `useDeterministicOrdering` is set),
+  the width of the window over which endpoints are load-balanced may be
+  wider than the `logical_aperture` gauge. The `physical_aperture` represents
+  this value.
 
 **use_deterministic_ordering**
-  1 if the Apeture implementation uses deterministic ordering
+  1 if the Aperture implementation uses deterministic ordering
   0, otherwise.
+
+**vector_hash**
+  A gauge of the hash of the distributors serverset vector.
 
 **coordinate_updates**
   A counter of the number of times the Aperture implementation receives
-  updates from the `DeterministicOrdering` process global.
+  updates from the `ProcessCoordinate` process global.
+
+**rebuild_no_coordinate**
+  A counter which tracks the number of rebuilds without a `coordinate` set
+  when `use_deterministic_ordering` is 1.
+
+**expired**
+  A counter of the number of endpoints which have been closed because they
+  have fallen out of the aperture window and become idle.

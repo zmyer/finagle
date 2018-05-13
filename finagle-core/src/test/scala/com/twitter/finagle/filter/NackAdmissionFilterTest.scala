@@ -1,18 +1,16 @@
 package com.twitter.finagle.filter
 
 import com.twitter.conversions.time._
+import com.twitter.finagle.param
 import com.twitter.finagle.service.FailedService
 import com.twitter.finagle.stats.InMemoryStatsReceiver
 import com.twitter.finagle.toggle.flag
 import com.twitter.finagle.util.{DefaultLogger, Ema, Rng}
-import com.twitter.finagle.{Failure, Service}
+import com.twitter.finagle.{Failure, Service, Stack, ServiceFactory}
 import com.twitter.util._
 import java.util.logging.Logger
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class NackAdmissionFilterTest extends FunSuite {
   // NB: [[DefaultWindow]] and [[DefaultNackRateThreshold]] values are
   //     arbitrary.
@@ -33,14 +31,16 @@ class NackAdmissionFilterTest extends FunSuite {
     override def nanos(): Long = Time.now.inNanoseconds
   }
 
-  class Ctx(random: Rng = Rng(0x5eeded),
-            _window: Duration = DefaultWindow,
-            _nackRateThreshold: Double = DefaultNackRateThreshold) {
+  class Ctx(
+    random: Rng = Rng(0x5eeded),
+    _window: Duration = DefaultWindow,
+    _nackRateThreshold: Double = DefaultNackRateThreshold
+  ) {
     val log: Logger = DefaultLogger
     val timer: MockTimer = new MockTimer
     val statsReceiver: InMemoryStatsReceiver = new InMemoryStatsReceiver()
 
-    val DefaultAcceptRateThreshold = 1.0 - DefaultNackRateThreshold
+    val DefaultAcceptRateThreshold: Double = 1.0 - DefaultNackRateThreshold
 
     val svc: Service[Int, Int] = Service.mk[Int, Int](v => Future.value(v))
 
@@ -52,6 +52,8 @@ class NackAdmissionFilterTest extends FunSuite {
     val failingInterruptedSvc: Service[Int, Int] = new FailedService(interruptedFailure)
     val failingNamingSvc: Service[Int, Int] = new FailedService(namingFailure)
 
+    val rpsThreshold: Int = 5
+
     // Used to ensure that the accept rate is safely above or below the
     // accept rate threshold.
     val extraProbability: Double = 0.01
@@ -59,7 +61,12 @@ class NackAdmissionFilterTest extends FunSuite {
     val monoTimer = new FakeTimer()
 
     val filter: NackAdmissionFilter[Int, Int] = new NackAdmissionFilter[Int, Int](
-      _window, _nackRateThreshold, random, statsReceiver, monoTimer)
+      _window,
+      _nackRateThreshold,
+      random,
+      statsReceiver,
+      monoTimer
+    )
 
     def successfulResponse(): Unit = {
       assert(Await.result(filter(1, svc), DefaultTimeout) == 1)
@@ -84,7 +91,7 @@ class NackAdmissionFilterTest extends FunSuite {
      * know that the nack rate is below the failure threshold.
      */
     def testDropsRequest(): Unit = {
-      failedResponse("Failed fast because service is overloaded")
+      failedResponse("Request not issued to the backend due to observed overload.")
     }
 
     /**
@@ -127,20 +134,41 @@ class NackAdmissionFilterTest extends FunSuite {
     }
   }
 
+  testEnabled("Can be disabled by configuration param") { ctl =>
+
+    val nackSvc = ServiceFactory.const[Int, Int](new FailedService(Failure.rejected("goaway")))
+    val stats = new InMemoryStatsReceiver
+
+    val s: Stack[ServiceFactory[Int, Int]] =
+      NackAdmissionFilter
+        .module[Int, Int]
+        .toStack(Stack.Leaf(Stack.Role("svc"), nackSvc))
+
+    val ps: Stack.Params = Stack.Params.empty + param.Stats(stats)
+
+    val sf = s.make(ps + NackAdmissionFilter.Disabled)
+
+    // Make sure the NAF module is skipped
+    assert(sf.equals(nackSvc))
+  }
 
   testEnabled("increases acceptProbability when request is not NACKed") { ctl =>
     val ctx = new Ctx
     import ctx._
 
     ctl.advance(10.milliseconds)
-    // Decrease Ema to just below 1
-    testGetNack()
+    // Decrease Ema to be below 1
+    for (_ <- 1 to 2*rpsThreshold) {
+      testGetNack()
+      // Need to update timestamp as well
+      ctl.advance(10.milliseconds)
+    }
     val firstEmaValue = filter.emaValue
 
     ctl.advance(10.milliseconds)
 
     // Increment Ema
-    testGetSuccessfulResponse()
+      testGetSuccessfulResponse()
     assert(filter.emaValue > firstEmaValue)
   }
 
@@ -148,7 +176,10 @@ class NackAdmissionFilterTest extends FunSuite {
     val ctx = new Ctx
     import ctx._
     ctl.advance(10.milliseconds)
-    testGetNack()
+    for (_ <- 1 to 2*rpsThreshold) {
+      testGetNack()
+      ctl.advance(10.milliseconds)
+    }
     assert(filter.emaValue < 1)
   }
 
@@ -169,7 +200,7 @@ class NackAdmissionFilterTest extends FunSuite {
     }
 
     val successRate = filter.emaValue
-    val multiplier = 1D/DefaultAcceptRateThreshold
+    val multiplier = 1D / DefaultAcceptRateThreshold
 
     assert(0 < successRate && successRate < 1)
     assert(1 <= multiplier * successRate)
@@ -191,7 +222,7 @@ class NackAdmissionFilterTest extends FunSuite {
     }
 
     val successRate = filter.emaValue
-    val multiplier = 1D/DefaultAcceptRateThreshold
+    val multiplier = 1D / DefaultAcceptRateThreshold
 
     assert(0 < successRate && successRate < 1)
     assert(1 > multiplier * successRate)
@@ -211,7 +242,7 @@ class NackAdmissionFilterTest extends FunSuite {
     }
 
     val successRate = filter.emaValue
-    val multiplier = 1D/DefaultAcceptRateThreshold
+    val multiplier = 1D / DefaultAcceptRateThreshold
 
     assert(0 < successRate && successRate < 1)
     assert(1 > multiplier * successRate)
@@ -241,7 +272,7 @@ class NackAdmissionFilterTest extends FunSuite {
     }
 
     val successRate = filter.emaValue
-    val multiplier = 1D/DefaultAcceptRateThreshold
+    val multiplier = 1D / DefaultAcceptRateThreshold
 
     assert(0 < successRate && successRate < 1)
     assert(1 > multiplier * successRate)
@@ -273,7 +304,7 @@ class NackAdmissionFilterTest extends FunSuite {
 
     // Nack until EMA is so low that it would not be likely for any requests to
     // get through without the MaxDropProbability.
-    while(filter.emaValue > 10E-10) {
+    while (filter.emaValue > 10E-10) {
       ctl.advance(1.second)
       nackWithoutTest()
     }
@@ -281,7 +312,7 @@ class NackAdmissionFilterTest extends FunSuite {
     var dropCount = statsReceiver.counter("dropped_requests")()
 
     // Nack a bunch
-    for(_ <- 0 to NumRequests) {
+    for (_ <- 0 to NumRequests) {
       ctl.advance(1.second)
       nackWithoutTest()
     }
@@ -297,7 +328,7 @@ class NackAdmissionFilterTest extends FunSuite {
     assert(dropCount > minDropped)
 
     // Have a bunch of successful requests. Test recovery
-    for(_ <- 0 to NumRequests) {
+    for (_ <- 0 to NumRequests) {
       ctl.advance(1.second)
       Await.result(filter(1, svc).unit.rescue { case _ => Future.Unit }, DefaultTimeout)
     }
@@ -311,6 +342,12 @@ class NackAdmissionFilterTest extends FunSuite {
     val lowRng: CustomRng = new CustomRng(0)
     val ctx = new Ctx(lowRng, 100.milliseconds)
     import ctx._
+
+    ctl.advance(10.milliseconds)
+    for (_ <- 1 to rpsThreshold) {
+      testGetNack()
+      ctl.advance(10.milliseconds)
+    }
 
     // Pass time so NACKs can significantly reduce the Ema value
     ctl.advance(200.milliseconds)
@@ -369,7 +406,10 @@ class NackAdmissionFilterTest extends FunSuite {
     assert(filter.emaValue == originalEma)
 
     ctl.advance(10.milliseconds)
-    testGetNack()
+    for (_ <- 0 to rpsThreshold) {
+      testGetNack()
+      ctl.advance(10.milliseconds)
+    }
     assert(filter.emaValue < originalEma)
   }
 
@@ -408,7 +448,8 @@ class NackAdmissionFilterTest extends FunSuite {
   test("negative nackRateThreshold value throws IllegalArgumentException") {
     val lowRng: CustomRng = new CustomRng(0)
     val _nackRateThreshold: Double = -5.5
-    val errMsg: String = s"requirement failed: nackRateThreshold must lie in (0, 1): ${_nackRateThreshold}"
+    val errMsg: String =
+      s"requirement failed: nackRateThreshold must lie in (0, 1): ${_nackRateThreshold}"
     val thrown: IllegalArgumentException = intercept[IllegalArgumentException] {
       new Ctx(lowRng, DefaultWindow, _nackRateThreshold)
     }
@@ -418,7 +459,8 @@ class NackAdmissionFilterTest extends FunSuite {
   test("nackRateThreshold value of 0 throws IllegalArgumentException") {
     val lowRng: CustomRng = new CustomRng(0)
     val _nackRateThreshold: Double = 0
-    val errMsg: String = s"requirement failed: nackRateThreshold must lie in (0, 1): ${_nackRateThreshold}"
+    val errMsg: String =
+      s"requirement failed: nackRateThreshold must lie in (0, 1): ${_nackRateThreshold}"
     val thrown: IllegalArgumentException = intercept[IllegalArgumentException] {
       new Ctx(lowRng, DefaultWindow, _nackRateThreshold)
     }
@@ -428,7 +470,8 @@ class NackAdmissionFilterTest extends FunSuite {
   test("nackRateThreshold value of 1 throws IllegalArgumentException") {
     val lowRng: CustomRng = new CustomRng(0)
     val _nackRateThreshold: Double = 1
-    val errMsg: String = s"requirement failed: nackRateThreshold must lie in (0, 1): ${_nackRateThreshold}"
+    val errMsg: String =
+      s"requirement failed: nackRateThreshold must lie in (0, 1): ${_nackRateThreshold}"
     val thrown: IllegalArgumentException = intercept[IllegalArgumentException] {
       new Ctx(lowRng, DefaultWindow, _nackRateThreshold)
     }
@@ -438,7 +481,8 @@ class NackAdmissionFilterTest extends FunSuite {
   test("nackRateThreshold value greater than 1 throws IllegalArgumentException") {
     val lowRng: CustomRng = new CustomRng(0)
     val _nackRateThreshold: Double = 1.5
-    val errMsg: String = s"requirement failed: nackRateThreshold must lie in (0, 1): ${_nackRateThreshold}"
+    val errMsg: String =
+      s"requirement failed: nackRateThreshold must lie in (0, 1): ${_nackRateThreshold}"
     val thrown: IllegalArgumentException = intercept[IllegalArgumentException] {
       new Ctx(lowRng, DefaultWindow, _nackRateThreshold)
     }

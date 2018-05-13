@@ -2,7 +2,6 @@ package com.twitter.finagle.http
 
 import com.twitter.conversions.time._
 import com.twitter.finagle.http2.param.PriorKnowledge
-import com.twitter.finagle.netty4.ByteBufAsBuf
 import com.twitter.finagle.stats.NullStatsReceiver
 import com.twitter.finagle.{Service, Http => FinagleHttp}
 import com.twitter.io.Buf
@@ -15,7 +14,6 @@ class DirectPayloadsLifecycleTest extends FunSuite {
   def doTest(name: String, client: FinagleHttp.Client, server: FinagleHttp.Server): Unit = {
     def assertNonDirect(b: Buf): Unit = b match {
       case Buf.ByteBuffer(byteBuffer) => assert(!byteBuffer.isDirect)
-      case ByteBufAsBuf.Owned(byteBuf) => assert(!byteBuf.isDirect)
       case _ => () // other cases are guaranteed to be backed by heap buffers
     }
 
@@ -51,26 +49,26 @@ class DirectPayloadsLifecycleTest extends FunSuite {
 
   doTest(
     "HTTP/1.1",
-    FinagleHttp.client.configured(FinagleHttp.Netty4Impl),
-    FinagleHttp.server.configured(FinagleHttp.Netty4Impl)
+    FinagleHttp.client.withNoHttp2,
+    FinagleHttp.server.withNoHttp2
   )
 
   doTest(
     "HTTP/2",
-    FinagleHttp.client.configuredParams(FinagleHttp.Http2),
-    FinagleHttp.server.configuredParams(FinagleHttp.Http2)
+    FinagleHttp.client.withHttp2,
+    FinagleHttp.server.withHttp2
   )
 
   doTest(
     "HTTP/2 client <-> HTTP/1.1 server",
-    FinagleHttp.client.configuredParams(FinagleHttp.Http2),
+    FinagleHttp.client.withHttp2,
     FinagleHttp.server
   )
 
   doTest(
     "Prior Knowledge HTTP/2",
-    FinagleHttp.client.configuredParams(FinagleHttp.Http2).configured(PriorKnowledge(true)),
-    FinagleHttp.server.configuredParams(FinagleHttp.Http2)
+    FinagleHttp.client.withHttp2.configured(PriorKnowledge(true)),
+    FinagleHttp.server.withHttp2
   )
 
   // TODO: Test ALPN

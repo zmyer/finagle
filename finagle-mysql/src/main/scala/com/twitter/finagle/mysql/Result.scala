@@ -21,45 +21,49 @@ trait Decoder[T <: Result] extends (Packet => Try[T]) {
  * [[http://dev.mysql.com/doc/internals/en/connection-phase-packets.html]]
  */
 object HandshakeInit extends Decoder[HandshakeInit] {
-  def decode(packet: Packet) = {
+  def decode(packet: Packet): HandshakeInit = {
     val br = MysqlBuf.reader(packet.body)
-    val protocol = br.readByte()
-    val bytesVersion = br.readNullTerminatedBytes()
-    val threadId = br.readIntLE()
-    val salt1 = Buf.ByteArray.Owned.extract(br.readBytes(8))
-    br.skip(1) // 1 filler byte always 0x00
+    try {
+      val protocol = br.readByte()
+      val bytesVersion = br.readNullTerminatedBytes()
+      val threadId = br.readIntLE()
+      val salt1 = Buf.ByteArray.Owned.extract(br.readBytes(8))
+      br.skip(1) // 1 filler byte always 0x00
 
-    // the rest of the fields are optional and protocol version specific
-    val capLow = if (br.remaining >= 2) br.readUnsignedShortLE() else 0
+      // the rest of the fields are optional and protocol version specific
+      val capLow = if (br.remaining >= 2) br.readUnsignedShortLE() else 0
 
-    require(protocol == 10 && (capLow & Capability.Protocol41) != 0,
-      "unsupported protocol version")
+      require(
+        protocol == 10 && (capLow & Capability.Protocol41) != 0,
+        "unsupported protocol version"
+      )
 
-    val charset = br.readUnsignedByte().toShort
-    val status = br.readShortLE().toShort
-    val capHigh = br.readUnsignedShortLE() << 16
-    val serverCap = Capability(capHigh, capLow)
+      val charset = br.readUnsignedByte()
+      val status = br.readShortLE()
+      val capHigh = br.readUnsignedShortLE() << 16
+      val serverCap = Capability(capHigh, capLow)
 
-    // auth plugin data. Currently unused but we could verify
-    // that our secure connections respect the expected size.
-    br.skip(1)
+      // auth plugin data. Currently unused but we could verify
+      // that our secure connections respect the expected size.
+      br.skip(1)
 
-    // next 10 bytes are all reserved
-    br.readBytes(10)
+      // next 10 bytes are all reserved
+      br.readBytes(10)
 
-    val salt2 =
-      if (!serverCap.has(Capability.SecureConnection)) Array.empty[Byte]
-      else br.readNullTerminatedBytes()
+      val salt2 =
+        if (!serverCap.has(Capability.SecureConnection)) Array.empty[Byte]
+        else br.readNullTerminatedBytes()
 
-    HandshakeInit(
-      protocol,
-      new String(bytesVersion, Charset(charset)),
-      threadId,
-      Array.concat(salt1, salt2),
-      serverCap,
-      charset,
-      status
-    )
+      HandshakeInit(
+        protocol,
+        new String(bytesVersion, Charset(charset)),
+        threadId,
+        Array.concat(salt1, salt2),
+        serverCap,
+        charset,
+        status
+      )
+    } finally br.close()
   }
 }
 
@@ -79,16 +83,18 @@ case class HandshakeInit(
  * [[http://dev.mysql.com/doc/internals/en/generic-response-packets.html#packet-OK_Packet]]
  */
 object OK extends Decoder[OK] {
-  def decode(packet: Packet) = {
+  def decode(packet: Packet): OK = {
     val br = MysqlBuf.reader(packet.body)
-    br.skip(1)
-    OK(
-      br.readVariableLong(),
-      br.readVariableLong(),
-      br.readUnsignedShortLE(),
-      br.readUnsignedShortLE(),
-      new String(br.take(br.remaining))
-    )
+    try {
+      br.skip(1)
+      OK(
+        br.readVariableLong(),
+        br.readVariableLong(),
+        br.readUnsignedShortLE(),
+        br.readUnsignedShortLE(),
+        new String(br.take(br.remaining))
+      )
+    } finally br.close()
   }
 }
 
@@ -105,14 +111,16 @@ case class OK(
  * [[http://dev.mysql.com/doc/internals/en/generic-response-packets.html#packet-ERR_Packet]]
  */
 object Error extends Decoder[Error] {
-  def decode(packet: Packet) = {
+  def decode(packet: Packet): Error = {
     // start reading after flag byte
     val br = MysqlBuf.reader(packet.body)
-    br.skip(1)
-    val code = br.readShortLE()
-    val state = new String(br.take(6))
-    val msg = new String(br.take(br.remaining))
-    Error(code, state, msg)
+    try {
+      br.skip(1)
+      val code = br.readShortLE()
+      val state = new String(br.take(6))
+      val msg = new String(br.take(br.remaining))
+      Error(code, state, msg)
+    } finally br.close()
   }
 }
 
@@ -124,14 +132,32 @@ case class Error(code: Short, sqlState: String, message: String) extends Result
  * [[http://dev.mysql.com/doc/internals/en/generic-response-packets.html#packet-EOF_Packet]]
  */
 object EOF extends Decoder[EOF] {
-  def decode(packet: Packet) = {
+  def decode(packet: Packet): EOF = {
     val br = MysqlBuf.reader(packet.body)
-    br.skip(1)
-    EOF(br.readShortLE(), ServerStatus(br.readShortLE()))
+    try {
+      br.skip(1)
+      EOF(br.readShortLE(), ServerStatus(br.readShortLE()))
+    } finally br.close()
   }
 }
 
 case class EOF(warnings: Short, serverStatus: ServerStatus) extends Result
+
+/**
+ * These bit masks are to understand whether corresponding attribute
+ * is set for the field. Link to source code from mysql is below.
+ * [[https://github.com/mysql/mysql-server/blob/5.7/include/mysql_com.h]]
+ */
+object FieldAttributes {
+  val NotNullBitMask: Short = 1
+  val PrimaryKeyBitMask: Short = 2
+  val UniqueKeyBitMask: Short = 4
+  val MultipleKeyBitMask: Short = 8
+  val BlobBitMask: Short = 16
+  val UnsignedBitMask: Short = 32
+  val ZeroFillBitMask: Short = 64
+  val BinaryBitMask: Short = 128
+}
 
 /**
  * Represents the column meta-data associated with a query.
@@ -141,39 +167,41 @@ case class EOF(warnings: Short, serverStatus: ServerStatus) extends Result
  */
 object Field extends Decoder[Field] {
   def decode(packet: Packet): Field = {
-    val bw = MysqlBuf.reader(packet.body)
-    val bytesCatalog = bw.readLengthCodedBytes()
-    val bytesDb = bw.readLengthCodedBytes()
-    val bytesTable = bw.readLengthCodedBytes()
-    val bytesOrigTable = bw.readLengthCodedBytes()
-    val bytesName = bw.readLengthCodedBytes()
-    val bytesOrigName = bw.readLengthCodedBytes()
-    bw.readVariableLong() // length of the following fields (always 0x0c)
-    val charset = bw.readShortLE()
-    val jCharset = Charset(charset)
-    val catalog = new String(bytesCatalog, jCharset)
-    val db = new String(bytesDb, jCharset)
-    val table = new String(bytesTable, jCharset)
-    val origTable = new String(bytesOrigTable, jCharset)
-    val name = new String(bytesName, jCharset)
-    val origName = new String(bytesOrigName, jCharset)
-    val length = bw.readIntLE()
-    val fieldType = bw.readUnsignedByte()
-    val flags = bw.readShortLE()
-    val decimals = bw.readByte()
-    Field(
-      catalog,
-      db,
-      table,
-      origTable,
-      name,
-      origName,
-      charset,
-      length,
-      fieldType,
-      flags,
-      decimals
-    )
+    val br = MysqlBuf.reader(packet.body)
+    try {
+      val bytesCatalog = br.readLengthCodedBytes()
+      val bytesDb = br.readLengthCodedBytes()
+      val bytesTable = br.readLengthCodedBytes()
+      val bytesOrigTable = br.readLengthCodedBytes()
+      val bytesName = br.readLengthCodedBytes()
+      val bytesOrigName = br.readLengthCodedBytes()
+      br.readVariableLong() // length of the following fields (always 0x0c)
+      val charset = br.readShortLE()
+      val jCharset = Charset(charset)
+      val catalog = new String(bytesCatalog, jCharset)
+      val db = new String(bytesDb, jCharset)
+      val table = new String(bytesTable, jCharset)
+      val origTable = new String(bytesOrigTable, jCharset)
+      val name = new String(bytesName, jCharset)
+      val origName = new String(bytesOrigName, jCharset)
+      val length = br.readIntLE()
+      val fieldType = br.readUnsignedByte()
+      val flags = br.readShortLE()
+      val decimals = br.readByte()
+      Field(
+        catalog,
+        db,
+        table,
+        origTable,
+        name,
+        origName,
+        charset,
+        length,
+        fieldType,
+        flags,
+        decimals
+      )
+    } finally br.close()
   }
 }
 
@@ -191,7 +219,10 @@ case class Field(
   decimals: Byte
 ) extends Result {
   def id: String = if (name.isEmpty) origName else name
-  override val toString = "Field(%s)".format(id)
+  override def toString: String = s"Field($id)"
+
+  def isUnsigned: Boolean = (flags & FieldAttributes.UnsignedBitMask) > 0
+  def isSigned: Boolean = !isUnsigned
 }
 
 /**
@@ -201,15 +232,17 @@ case class Field(
  * [[http://dev.mysql.com/doc/internals/en/com-stmt-prepare-response.html#packet-COM_STMT_PREPARE_OK]]
  */
 object PrepareOK extends Decoder[PrepareOK] {
-  def decode(header: Packet) = {
+  def decode(header: Packet): PrepareOK = {
     val br = MysqlBuf.reader(header.body)
-    br.skip(1)
-    val stmtId = br.readIntLE()
-    val numCols = br.readUnsignedShortLE()
-    val numParams = br.readUnsignedShortLE()
-    br.skip(1)
-    val warningCount = br.readUnsignedShortLE()
-    PrepareOK(stmtId, numCols, numParams, warningCount)
+    try {
+      br.skip(1)
+      val stmtId = br.readIntLE()
+      val numCols = br.readUnsignedShortLE()
+      val numParams = br.readUnsignedShortLE()
+      br.skip(1)
+      val warningCount = br.readUnsignedShortLE()
+      PrepareOK(stmtId, numCols, numParams, warningCount)
+    } finally br.close()
   }
 }
 
@@ -227,7 +260,7 @@ case class PrepareOK(
  * the server when sending a prepared statement
  * CloseRequest
  */
-object CloseStatementOK extends OK(0,0,0,0, "Internal Close OK")
+object CloseStatementOK extends OK(0, 0, 0, 0, "Internal Close OK")
 
 /**
  * Resultset returned from the server containing field definitions and
@@ -236,20 +269,29 @@ object CloseStatementOK extends OK(0,0,0,0, "Internal Close OK")
  * [[http://dev.mysql.com/doc/internals/en/com-query-response.html#packet-ProtocolText::Resultset]]
  * [[http://dev.mysql.com/doc/internals/en/binary-protocol-resultset.html]]
  */
-object ResultSet {
-  def apply(isBinaryEncoded: Boolean)(
+private object ResultSetBuilder {
+  def apply(isBinaryEncoded: Boolean, supportUnsigned: Boolean)(
     header: Packet,
     fieldPackets: Seq[Packet],
     rowPackets: Seq[Packet]
-  ): Try[ResultSet] = Try(decode(isBinaryEncoded)(header, fieldPackets, rowPackets))
+  ): Try[ResultSet] =
+    Try(decode(isBinaryEncoded, supportUnsigned)(header, fieldPackets, rowPackets))
 
-  def decode(isBinaryEncoded: Boolean)(header: Packet, fieldPackets: Seq[Packet], rowPackets: Seq[Packet]): ResultSet = {
+  def decode(
+    isBinaryEncoded: Boolean,
+    supportUnsigned: Boolean
+  )(header: Packet, fieldPackets: Seq[Packet], rowPackets: Seq[Packet]): ResultSet = {
     val fields = fieldPackets.map(Field.decode).toIndexedSeq
 
-    decodeRows(isBinaryEncoded, rowPackets, fields)
+    decodeRows(isBinaryEncoded, supportUnsigned, rowPackets, fields)
   }
 
-  def decodeRows(isBinaryEncoded: Boolean, rowPackets: Seq[Packet], fields: IndexedSeq[Field]): ResultSet = {
+  private[this] def decodeRows(
+    isBinaryEncoded: Boolean,
+    supportUnsigned: Boolean,
+    rowPackets: Seq[Packet],
+    fields: IndexedSeq[Field]
+  ): ResultSet = {
     // A name -> index map used to allow quick lookups for rows based on name.
     val indexMap = fields.map(_.id).zipWithIndex.toMap
 
@@ -260,9 +302,9 @@ object ResultSet {
      */
     val rows = rowPackets.map { p: Packet =>
       if (!isBinaryEncoded)
-        new StringEncodedRow(p.body, fields, indexMap)
+        new StringEncodedRow(p.body, fields, indexMap, !supportUnsigned)
       else
-        new BinaryEncodedRow(p.body, fields, indexMap)
+        new BinaryEncodedRow(p.body, fields, indexMap, !supportUnsigned)
     }
 
     ResultSet(fields, rows)
@@ -292,5 +334,8 @@ object FetchResult {
 }
 
 case class FetchResult(rowPackets: Seq[Packet], containsLastRow: Boolean) extends Result {
-  override def toString: String = s"FetchResult(rows=${rowPackets.size}, containsLastRow=$containsLastRow)"
+  override def toString: String =
+    s"FetchResult(rows=${rowPackets.size}, containsLastRow=$containsLastRow)"
 }
+
+private[finagle] object PoisonedConnectionResult extends Result

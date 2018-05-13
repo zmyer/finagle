@@ -9,7 +9,7 @@ import io.netty.handler.ssl.SslHandler
 import java.net.SocketAddress
 import java.security.cert.Certificate
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
-import scala.util.control.NonFatal
+import scala.util.control.{NonFatal, NoStackTrace}
 
 /**
  * A [[Transport]] implementation based on Netty's [[nettyChan.Channel]].
@@ -23,16 +23,18 @@ import scala.util.control.NonFatal
  *       handlers inserted after that won't get any of the inbound traffic.
  */
 private[finagle] class ChannelTransport(
-    ch: nettyChan.Channel,
-    readQueue: AsyncQueue[Any] = new AsyncQueue[Any])
-  extends Transport[Any, Any] {
+  ch: nettyChan.Channel,
+  readQueue: AsyncQueue[Any] = new AsyncQueue[Any],
+  omitStackTraceOnInactive: Boolean = false
+) extends Transport[Any, Any] {
+
+  type Context = Netty4Context
 
   import ChannelTransport._
 
-
   private[this] val failed = new AtomicBoolean(false)
   private[this] val closed = new Promise[Throwable]
-
+  private[this] val alreadyClosed = new AtomicBoolean(false)
 
   private[this] val readInterruptHandler: PartialFunction[Throwable, Unit] = {
     case e =>
@@ -101,7 +103,8 @@ private[finagle] class ChannelTransport(
     val p = new Promise[Unit]
     op.addListener(new nettyChan.ChannelFutureListener {
       def operationComplete(f: nettyChan.ChannelFuture): Unit =
-        if (f.isSuccess) p.setDone() else {
+        if (f.isSuccess) p.setDone()
+        else {
           p.setException(ChannelException(f.cause, remoteAddress))
         }
     })
@@ -135,11 +138,13 @@ private[finagle] class ChannelTransport(
 
   def status: Status =
     if (failed.get || !ch.isOpen) Status.Closed
-    else if (!ch.isWritable) Status.Busy
     else Status.Open
 
   def close(deadline: Time): Future[Unit] = {
-    if (ch.isOpen) ch.close()
+    // we check if this has already been closed because of a netty bug
+    // https://github.com/netty/netty/issues/7638.  Remove this work-around once
+    // it's fixed.
+    if (alreadyClosed.compareAndSet(false, true) && ch.isOpen) ch.close()
     closed.unit
   }
 
@@ -159,37 +164,45 @@ private[finagle] class ChannelTransport(
 
   override def toString = s"Transport<channel=$ch, onClose=$closed>"
 
-  ch.pipeline.addLast(HandlerName, new nettyChan.ChannelInboundHandlerAdapter {
+  ch.pipeline.addLast(
+    HandlerName,
+    new nettyChan.ChannelInboundHandlerAdapter {
 
-    override def channelActive(ctx: nettyChan.ChannelHandlerContext): Unit = {
-      // Upon startup we immediately begin the process of buffering at most one inbound
-      // message in order to detect channel close events. Otherwise we would have
-      // different buffering behavior before and after the first `Transport.read()` event.
-      ReadManager.readIfNeeded()
-      super.channelActive(ctx)
+      override def channelActive(ctx: nettyChan.ChannelHandlerContext): Unit = {
+        // Upon startup we immediately begin the process of buffering at most one inbound
+        // message in order to detect channel close events. Otherwise we would have
+        // different buffering behavior before and after the first `Transport.read()` event.
+        ReadManager.readIfNeeded()
+        super.channelActive(ctx)
+      }
+
+      override def channelReadComplete(ctx: nettyChan.ChannelHandlerContext): Unit = {
+        // Check to see if we need more data
+        ReadManager.readIfNeeded()
+        super.channelReadComplete(ctx)
+      }
+
+      override def channelRead(ctx: nettyChan.ChannelHandlerContext, msg: Any): Unit = {
+        ReadManager.decrement()
+
+        if (!readQueue.offer(msg)) // Dropped messages are fatal
+          fail(Failure(s"offer failure on $this $readQueue"))
+      }
+
+      override def channelInactive(ctx: nettyChan.ChannelHandlerContext): Unit = {
+        alreadyClosed.set(true)
+        if (omitStackTraceOnInactive) {
+          fail(new ChannelClosedException(remoteAddress) with NoStackTrace)
+        } else fail(new ChannelClosedException(remoteAddress))
+      }
+
+      override def exceptionCaught(ctx: nettyChan.ChannelHandlerContext, e: Throwable): Unit = {
+        fail(ChannelException(e, remoteAddress))
+      }
     }
+  )
 
-    override def channelReadComplete(ctx: nettyChan.ChannelHandlerContext): Unit = {
-      // Check to see if we need more data
-      ReadManager.readIfNeeded()
-      super.channelReadComplete(ctx)
-    }
-
-    override def channelRead(ctx: nettyChan.ChannelHandlerContext, msg: Any): Unit = {
-      ReadManager.decrement()
-
-      if (!readQueue.offer(msg)) // Dropped messages are fatal
-        fail(Failure(s"offer failure on $this $readQueue"))
-    }
-
-    override def channelInactive(ctx: nettyChan.ChannelHandlerContext): Unit = {
-      fail(new ChannelClosedException(remoteAddress))
-    }
-
-    override def exceptionCaught(ctx: nettyChan.ChannelHandlerContext, e: Throwable): Unit = {
-      fail(ChannelException(e, remoteAddress))
-    }
-  })
+  val context: Netty4Context = new Netty4Context(this, ch.eventLoop)
 }
 
 private[finagle] object ChannelTransport {

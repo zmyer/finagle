@@ -5,6 +5,7 @@ import com.twitter.finagle.stats.StatsReceiver
 import com.twitter.util.Future
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicInteger
+import scala.annotation.tailrec
 
 /**
  * A module which allows clients to limit the number of pending
@@ -45,8 +46,9 @@ object PendingRequestFilter {
       def make(_param: Param, _stats: param.Stats, next: ServiceFactory[Req, Rep]) = _param match {
         case Param(Some(limit)) =>
           val param.Stats(stats) = _stats
-          next.map(new PendingRequestFilter[Req, Rep](
-            limit, stats.scope("pending_requests")).andThen(_))
+          next.map(
+            new PendingRequestFilter[Req, Rep](limit, stats.scope("pending_requests")).andThen(_)
+          )
         case Param(None) => next
       }
     }
@@ -58,10 +60,8 @@ object PendingRequestFilter {
 /**
  * A filter which limits the number of pending requests to a service.
  */
-private[finagle] class PendingRequestFilter[Req, Rep](
-    limit: Int,
-    stats: StatsReceiver)
-  extends SimpleFilter[Req, Rep] {
+private[finagle] final class PendingRequestFilter[Req, Rep](limit: Int, stats: StatsReceiver)
+    extends SimpleFilter[Req, Rep] {
 
   import PendingRequestFilter._
 
@@ -71,19 +71,18 @@ private[finagle] class PendingRequestFilter[Req, Rep](
   private[this] val rejections = stats.counter("rejected")
 
   private[this] val pending = new AtomicInteger(0)
-  private[this] val decFn: Any => Unit = { _: Any => pending.decrementAndGet() }
+  private[this] val decFn: Any => Unit = { _: Any =>
+    pending.decrementAndGet()
+  }
 
-  def apply(req: Req, service: Service[Req, Rep]): Future[Rep] =
-    // N.B. There's a race on the sad path of this filter when we increment and
-    // then immediately decrement the atomic int which can cause services
-    // vacillating around their pending request limit to reject valid requests.
-    // We tolerate this on account that this will only further shed traffic
-    // from a session operating at its limits.
-    if (pending.incrementAndGet() > limit) {
-      pending.decrementAndGet()
+  @tailrec
+  def apply(req: Req, service: Service[Req, Rep]): Future[Rep] = {
+    val currentPending = pending.get
+    if (currentPending >= limit) {
       rejections.incr()
       Future.exception(Failure.rejected(PendingRequestsLimitExceeded))
-    } else {
+    } else if (pending.compareAndSet(currentPending, currentPending + 1)) {
       service(req).respond(decFn)
-    }
+    } else apply(req, service)
+  }
 }

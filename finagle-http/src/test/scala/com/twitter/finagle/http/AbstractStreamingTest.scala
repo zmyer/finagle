@@ -5,7 +5,7 @@ import com.twitter.finagle.{Http => FinagleHttp, _}
 import com.twitter.finagle.client.Transporter
 import com.twitter.finagle.server.Listener
 import com.twitter.finagle.service.ConstantService
-import com.twitter.finagle.transport.Transport
+import com.twitter.finagle.transport.{Transport, TransportContext}
 import com.twitter.io.{Buf, Reader, Writer}
 import com.twitter.util.{Await, Closable, Future, Promise, Return, Throw}
 import java.net.{InetSocketAddress, SocketAddress}
@@ -84,7 +84,7 @@ abstract class AbstractStreamingTest extends FunSuite {
     }
   }
 
-  test("client: request stream fails on write") (new ClientCtx {
+  test("client: request stream fails on write")(new ClientCtx {
     // Simulate network failure by closing the transport.
     failure.setDone()
 
@@ -96,21 +96,21 @@ abstract class AbstractStreamingTest extends FunSuite {
   })
 
   if (!sys.props.contains("SKIP_FLAKY"))
-  test("client: response stream fails on read") (new ClientCtx {
-    assert(!res2.isDefined)
-    // Reader should be suspended in a reading state.
-    val f = res.reader.read(1)
-    assert(!f.isDefined)
+    test("client: response stream fails on read")(new ClientCtx {
+      assert(!res2.isDefined)
+      // Reader should be suspended in a reading state.
+      val f = res.reader.read(1)
+      assert(!f.isDefined)
 
-    // Simulate network failure by closing the transport.
-    failure.setDone()
+      // Simulate network failure by closing the transport.
+      failure.setDone()
 
-    // Assert reading state suspension is interrupted by transport closure.
-    intercept[ChannelException] { await(f) }
-    intercept[Reader.ReaderDiscarded] { await(writeLots(req.writer, buf)) }
+      // Assert reading state suspension is interrupted by transport closure.
+      intercept[ChannelException] { await(f) }
+      intercept[Reader.ReaderDiscarded] { await(writeLots(req.writer, buf)) }
 
-    assertSecondRequestOk()
-  })
+      assertSecondRequestOk()
+    })
 
   test("client: server disconnect on pending response should fail request") {
     val failure = new Promise[Unit]
@@ -148,22 +148,22 @@ abstract class AbstractStreamingTest extends FunSuite {
   }
 
   if (!sys.props.contains("SKIP_FLAKY"))
-  test("client: fail request writer") (new ClientCtx {
-    assert(!res2.isDefined)
-    val exc = new Exception
-    req.writer.fail(exc)
+    test("client: fail request writer")(new ClientCtx {
+      assert(!res2.isDefined)
+      val exc = new Exception
+      req.writer.fail(exc)
 
-    res.reader.discard()
+      res.reader.discard()
 
-    assertSecondRequestOk()
-  })
+      assertSecondRequestOk()
+    })
 
   if (!sys.props.contains("SKIP_FLAKY"))
-  test("client: discard respond reader") (new ClientCtx {
-    assert(!res2.isDefined)
-    res.reader.discard()
-    assertSecondRequestOk()
-  })
+    test("client: discard respond reader")(new ClientCtx {
+      assert(!res2.isDefined)
+      res.reader.discard()
+      assertSecondRequestOk()
+    })
 
   test("server: request stream fails read") {
     val buf = Buf.Utf8(".")
@@ -195,7 +195,9 @@ abstract class AbstractStreamingTest extends FunSuite {
     // note: while the server is configured with a max concurrency of 1,
     // the requests flow through the transport before that. this means
     // that these requests must be sequenced.
-    val f2 = f1.flatMap { _ => client2(req2) }
+    val f2 = f1.flatMap { _ =>
+      client2(req2)
+    }
 
     val res = await(f1)
 
@@ -212,54 +214,56 @@ abstract class AbstractStreamingTest extends FunSuite {
   }
 
   if (!sys.props.contains("SKIP_FLAKY"))
-  test("server: response stream fails write") {
-    val buf = Buf.Utf8(".")
-    val n = new AtomicInteger(0)
-    val failure = new Promise[Unit]
-    val readp = new Promise[Unit]
-    val writer = Reader.writable()
-    val writep = new Promise[Unit]
-    failure.before(writeLots(writer, buf)).proxyTo(writep)
+    test("server: response stream fails write") {
+      val buf = Buf.Utf8(".")
+      val n = new AtomicInteger(0)
+      val failure = new Promise[Unit]
+      val readp = new Promise[Unit]
+      val writer = Reader.writable()
+      val writep = new Promise[Unit]
+      failure.before(writeLots(writer, buf)).proxyTo(writep)
 
-    val service = new Service[Request, Response] {
-      def apply(req: Request) = n.getAndIncrement() match {
-        case 0 =>
-          writep ensure req.reader.read(1).unit proxyTo readp
-          Future.value(ok(writer))
-        case _ =>
-          val writer = Reader.writable()
-          failure.ensure { writer.write(buf) ensure writer.close() }
-          Future.value(ok(writer))
+      val service = new Service[Request, Response] {
+        def apply(req: Request) = n.getAndIncrement() match {
+          case 0 =>
+            writep ensure req.reader.read(1).unit proxyTo readp
+            Future.value(ok(writer))
+          case _ =>
+            val writer = Reader.writable()
+            failure.ensure { writer.write(buf) ensure writer.close() }
+            Future.value(ok(writer))
+        }
       }
+
+      val (mod, closable) = closingOnceTransport(failure)
+      val server = startServer(service, mod)
+      val client1 = connect(server.boundAddress, identity, "client1")
+      val client2 = connect(server.boundAddress, identity, "client2")
+
+      val req1 = get("/")
+      val req2 = get("abc")
+      val f1 = client1(req1)
+      // note: while the server is configured with a max concurrency of 1,
+      // the requests flow through the transport before that. this means
+      // that these requests must be sequenced.
+      val f2 = f1.flatMap { _ =>
+        client2(req2)
+      }
+
+      val res = await(f1)
+
+      failure.setDone()
+      intercept[Reader.ReaderDiscarded] { await(writep) }
+      // This really should be ChannelClosedException, perhaps we're too
+      // indiscriminatory by calling discard on any error in the dispatcher.
+      intercept[Reader.ReaderDiscarded] { await(readp) }
+      intercept[ChannelException] { await(res.reader.read(1)) }
+      intercept[Reader.ReaderDiscarded] { await(writeLots(req1.writer, buf)) }
+
+      val res2 = await(f2)
+      await(Reader.readAll(res2.reader))
+      Closable.all(server, client1, client2, closable).close()
     }
-
-    val (mod, closable) = closingOnceTransport(failure)
-    val server = startServer(service, mod)
-    val client1 = connect(server.boundAddress, identity, "client1")
-    val client2 = connect(server.boundAddress, identity, "client2")
-
-    val req1 = get("/")
-    val req2 = get("abc")
-    val f1 = client1(req1)
-    // note: while the server is configured with a max concurrency of 1,
-    // the requests flow through the transport before that. this means
-    // that these requests must be sequenced.
-    val f2 = f1.flatMap { _ => client2(req2) }
-
-    val res = await(f1)
-
-    failure.setDone()
-    intercept[Reader.ReaderDiscarded] { await(writep) }
-    // This really should be ChannelClosedException, perhaps we're too
-    // indiscriminatory by calling discard on any error in the dispatcher.
-    intercept[Reader.ReaderDiscarded] { await(readp) }
-    intercept[ChannelException] { await(res.reader.read(1)) }
-    intercept[Reader.ReaderDiscarded] { await(writeLots(req1.writer, buf)) }
-
-    val res2 = await(f2)
-    await(Reader.readAll(res2.reader))
-    Closable.all(server, client1, client2, closable).close()
-  }
 
   test("server: fail response writer") {
     val buf = Buf.Utf8(".")
@@ -276,7 +280,7 @@ abstract class AbstractStreamingTest extends FunSuite {
           val writer = Reader.writable()
           failure.ensure { writer.write(buf) ensure writer.close() }
           Future.value(ok(writer))
-        }
+      }
     }
 
     val server = startServer(service, identity)
@@ -286,7 +290,9 @@ abstract class AbstractStreamingTest extends FunSuite {
     val req1 = get("/")
     val req2 = get("abc")
     val f1 = client1(req1)
-    val f2 = f1.flatMap { _ => client2(req2) }
+    val f2 = f1.flatMap { _ =>
+      client2(req2)
+    }
 
     val res = await(f1)
 
@@ -315,7 +321,7 @@ abstract class AbstractStreamingTest extends FunSuite {
           val writer = Reader.writable()
           failure.ensure { writer.write(buf) ensure writer.close() }
           Future.value(ok(writer))
-        }
+      }
     }
 
     val server = startServer(service, identity)
@@ -325,7 +331,9 @@ abstract class AbstractStreamingTest extends FunSuite {
     val req1 = get("/")
     val req2 = get("abc")
     val f1 = client1(req1)
-    val f2 = f1.flatMap { _ => client2(req2) }
+    val f2 = f1.flatMap { _ =>
+      client2(req2)
+    }
 
     val res = await(f1)
 
@@ -392,7 +400,11 @@ abstract class AbstractStreamingTest extends FunSuite {
       .serve(new InetSocketAddress(0), service)
   }
 
-  def connect(addr: SocketAddress, mod: Modifier, name: String = "client"): Service[Request, Response] = {
+  def connect(
+    addr: SocketAddress,
+    mod: Modifier,
+    name: String = "client"
+  ): Service[Request, Response] = {
     val modifiedImpl = impl.copy(transporter = modifiedTransporterFn(mod, impl.transporter))
     configureClient(FinagleHttp.client)
       .withStreaming(true)
@@ -448,30 +460,31 @@ object StreamingTest {
 
   def modifiedTransporterFn(
     mod: Modifier,
-    fn: Stack.Params => SocketAddress => Transporter[Any, Any]
-  ): Stack.Params => SocketAddress => Transporter[Any, Any] = { params: Stack.Params =>
-    { addr =>
-      val underlying = fn(params)(addr)
-      new Transporter[Any, Any] {
-        def apply(): Future[Transport[Any, Any]] = {
-          underlying().map(mod)
-        }
+    fn: Stack.Params => SocketAddress => Transporter[Any, Any, TransportContext]
+  ): Stack.Params => SocketAddress => Transporter[Any, Any, TransportContext] = {
+    params: Stack.Params =>
+      { addr =>
+        val underlying = fn(params)(addr)
+        new Transporter[Any, Any, TransportContext] {
+          def apply(): Future[Transport[Any, Any]] = {
+            underlying().map(mod)
+          }
 
-        def remoteAddress: SocketAddress = underlying.remoteAddress
+          def remoteAddress: SocketAddress = underlying.remoteAddress
+        }
       }
-    }
   }
 
   def modifiedListenerFn(
     mod: Modifier,
-    fn: Stack.Params => Listener[Any, Any]
-  ): Stack.Params => Listener[Any, Any] = { params: Stack.Params =>
+    fn: Stack.Params => Listener[Any, Any, TransportContext]
+  ): Stack.Params => Listener[Any, Any, TransportContext] = { params: Stack.Params =>
     val underlying = fn(params)
-    new Listener[Any, Any] {
+    new Listener[Any, Any, TransportContext] {
       def listen(
         addr: SocketAddress
       )(
-        serveTransport: Transport[Any, Any] => Unit
+        serveTransport: Transport[Any, Any] { type Context <: TransportContext } => Unit
       ): ListeningServer = underlying.listen(addr)(mod.andThen(serveTransport))
     }
   }

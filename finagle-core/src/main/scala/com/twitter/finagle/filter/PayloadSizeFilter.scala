@@ -1,10 +1,10 @@
 package com.twitter.finagle.filter
 
-import com.twitter.finagle.Stack.{Role, Module1}
+import com.twitter.finagle.Stack.{Module1, Role}
 import com.twitter.finagle.param.Stats
-import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.finagle.stats.{StatsReceiver, Verbosity}
 import com.twitter.finagle._
-import com.twitter.util.Future
+import com.twitter.util.{Future, Return, Try}
 
 /**
  * A filter that exports two histograms to a given [[StatsReceiver]].
@@ -13,20 +13,23 @@ import com.twitter.util.Future
  * 2. "response_payload_bytes" - a distribution of response payload sizes in bytes
  */
 private[finagle] class PayloadSizeFilter[Req, Rep](
-    statsReceiver: StatsReceiver,
-    reqSize: Req => Int,
-    repSize: Rep => Int)
-  extends SimpleFilter[Req, Rep] {
+  statsReceiver: StatsReceiver,
+  reqSize: Req => Int,
+  repSize: Rep => Int
+) extends SimpleFilter[Req, Rep] {
 
-  private[this] val requestBytes = statsReceiver.stat("request_payload_bytes")
-  private[this] val responseBytes = statsReceiver.stat("response_payload_bytes")
+  private[this] val requestBytes = statsReceiver.stat(Verbosity.Debug, "request_payload_bytes")
+  private[this] val responseBytes = statsReceiver.stat(Verbosity.Debug, "response_payload_bytes")
 
-  private[this] val recordRepSize: Rep => Unit =
-    rep => responseBytes.add(repSize(rep).toFloat)
+  private[this] val recordRepSize: Try[Rep] => Unit = {
+    case Return(rep) =>
+      responseBytes.add(repSize(rep).toFloat)
+    case _ =>
+  }
 
   def apply(req: Req, service: Service[Req, Rep]): Future[Rep] = {
     requestBytes.add(reqSize(req).toFloat)
-    service(req).onSuccess(recordRepSize)
+    service(req).respond(recordRepSize)
   }
 }
 

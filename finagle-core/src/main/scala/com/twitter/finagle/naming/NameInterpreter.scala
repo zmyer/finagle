@@ -9,6 +9,7 @@ import com.twitter.util.Activity
  * [[com.twitter.finagle.Dtab Dtab]] can affect the resolution process.
  */
 trait NameInterpreter {
+
   /**
    * Bind `path` against the given `dtab`.
    */
@@ -22,12 +23,12 @@ object NameInterpreter extends NameInterpreter {
    *
    * Can be modified to provide a different mechanism for name resolution.
    */
-  @volatile var global: NameInterpreter = DefaultInterpreter
+  @volatile var global: NameInterpreter = LoadedNameInterpreter
 
   /** Java API for setting the interpreter */
   def setGlobal(nameInterpreter: NameInterpreter): Unit =
     global = nameInterpreter
 
-  override def bind(dtab: Dtab, tree: Path): Activity[NameTree[Name.Bound]] =
-    global.bind(dtab, tree)
+  def bind(dtab: Dtab, path: Path): Activity[NameTree[Name.Bound]] =
+    global.bind(dtab, path)
 }

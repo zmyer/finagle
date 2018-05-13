@@ -26,13 +26,14 @@ private[ssl] object SslConfigurations {
         val tryKms = factory.getKeyManagers()
         tryKms match {
           case Return(kms) => Some(kms)
-          case Throw(ex) => throw SslConfigurationException(ex.getMessage, ex)
+          case Throw(ex) => throw SslConfigurationException(ex)
         }
       case _: KeyCredentials.CertKeyAndChain =>
         throw SslConfigurationException.notSupported(
-          "KeyCredentials.CertKeyAndChain", "SslConfigurations")
+          "KeyCredentials.CertKeyAndChain",
+          "SslConfigurations"
+        )
     }
-
 
   /**
    * Creates an optional array of `javax.net.ssl.TrustManager` based on the [[TrustCredentials]]
@@ -55,7 +56,7 @@ private[ssl] object SslConfigurations {
         val tryTms = factory.getTrustManagers()
         tryTms match {
           case Return(tms) => Some(tms)
-          case Throw(ex) => throw SslConfigurationException(ex.getMessage, ex)
+          case Throw(ex) => throw SslConfigurationException(ex)
         }
     }
 
@@ -81,7 +82,8 @@ private[ssl] object SslConfigurations {
     sslContext.init(
       getKeyManagers(keyCredentials).orNull,
       getTrustManagers(trustCredentials).orNull,
-      null)
+      null
+    )
     sslContext
   }
 
@@ -114,6 +116,25 @@ private[ssl] object SslConfigurations {
     }
 
   /**
+   * If a non-empty hostname is supplied, the engine is set to use
+   * "HTTPS"-style hostname verification.
+   *
+   * See: `javax.net.ssl.SSLParameters#setEndpointIdentificationAlgorithm` and
+   * https://docs.oracle.com/javase/7/docs/technotes/guides/security/StandardNames.html
+   * for more details.
+   */
+  def configureHostnameVerification(
+    sslEngine: SSLEngine,
+    hostname: Option[String]
+  ): Unit = hostname match {
+    case Some(_) =>
+      val sslParameters = sslEngine.getSSLParameters()
+      sslParameters.setEndpointIdentificationAlgorithm("HTTPS")
+      sslEngine.setSSLParameters(sslParameters)
+    case None => // do nothing
+  }
+
+  /**
    * Guard method for failing fast inside of a factory's apply method when
    * [[KeyCredentials]] are not supported.
    */
@@ -124,11 +145,12 @@ private[ssl] object SslConfigurations {
     keyCredentials match {
       case KeyCredentials.Unspecified => // Do Nothing
       case KeyCredentials.CertAndKey(_, _) =>
-        throw SslConfigurationException.notSupported(
-          "KeyCredentials.CertAndKey", engineFactoryName)
+        throw SslConfigurationException.notSupported("KeyCredentials.CertAndKey", engineFactoryName)
       case KeyCredentials.CertKeyAndChain(_, _, _) =>
         throw SslConfigurationException.notSupported(
-          "KeyCredentials.CertKeyAndChain", engineFactoryName)
+          "KeyCredentials.CertKeyAndChain",
+          engineFactoryName
+        )
     }
 
   /**
@@ -142,11 +164,12 @@ private[ssl] object SslConfigurations {
     trustCredentials match {
       case TrustCredentials.Unspecified => // Do Nothing
       case TrustCredentials.Insecure =>
-        throw SslConfigurationException.notSupported(
-          "TrustCredentials.Insecure", engineFactoryName)
+        throw SslConfigurationException.notSupported("TrustCredentials.Insecure", engineFactoryName)
       case TrustCredentials.CertCollection(_) =>
         throw SslConfigurationException.notSupported(
-          "TrustCredentials.CertCollection", engineFactoryName)
+          "TrustCredentials.CertCollection",
+          engineFactoryName
+        )
     }
 
   /**
@@ -160,8 +183,7 @@ private[ssl] object SslConfigurations {
     protocols match {
       case Protocols.Unspecified => // Do Nothing
       case Protocols.Enabled(_) =>
-        throw SslConfigurationException.notSupported(
-          "Protocols.Enabled", engineFactoryName)
+        throw SslConfigurationException.notSupported("Protocols.Enabled", engineFactoryName)
     }
 
   /**
@@ -176,7 +198,9 @@ private[ssl] object SslConfigurations {
       case ApplicationProtocols.Unspecified => // Do Nothing
       case ApplicationProtocols.Supported(_) =>
         throw SslConfigurationException.notSupported(
-          "ApplicationProtocols.Supported", engineFactoryName)
+          "ApplicationProtocols.Supported",
+          engineFactoryName
+        )
     }
 
   /**
@@ -190,14 +214,11 @@ private[ssl] object SslConfigurations {
     clientAuth match {
       case ClientAuth.Unspecified => // Do Nothing
       case ClientAuth.Off =>
-        throw SslConfigurationException.notSupported(
-          "ClientAuth.Off", engineFactoryName)
+        throw SslConfigurationException.notSupported("ClientAuth.Off", engineFactoryName)
       case ClientAuth.Wanted =>
-        throw SslConfigurationException.notSupported(
-          "ClientAuth.Wanted", engineFactoryName)
+        throw SslConfigurationException.notSupported("ClientAuth.Wanted", engineFactoryName)
       case ClientAuth.Needed =>
-        throw SslConfigurationException.notSupported(
-          "ClientAuth.Needed", engineFactoryName)
+        throw SslConfigurationException.notSupported("ClientAuth.Needed", engineFactoryName)
     }
 
 }

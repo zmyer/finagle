@@ -1,3 +1,13 @@
+Aperture
+<<<<<<<<
+
+**finagle/aperture/coordinate**
+  The process global coordinate for the process as sampled by
+  the Aperture implementation.
+
+**finagle/aperture/peerset_size**
+  A gauge of the size of the services peerset.
+
 FuturePool
 <<<<<<<<<<
 
@@ -13,6 +23,12 @@ exported as they share their underlying "thread pool".
 
 **finagle/future_pool/completed_tasks**
   A gauge of the number of total tasks that have completed execution.
+
+Push Based Abstractions
+<<<<<<<<<<<<<<<<<<<<<<<
+
+**finagle/push/unhandled_exceptions**
+  Family of counters for unhandled exceptions caught by the serial executor.
 
 Scheduler
 <<<<<<<<<
@@ -33,14 +49,18 @@ Scheduler
 Timer
 <<<<<
 
-**finagle/timer/pending_tasks**
+**finagle/timer/pending_tasks** `verbosity:debug`
   A stat of the number of pending tasks to run for
   :src:`HashedWheelTimer.Default <com/twitter/finagle/util/HashedWheelTimer.scala>`.
 
-**finagle/timer/deviation_ms**
+**finagle/timer/deviation_ms** `verbosity:debug`
   A stat of the deviation in milliseconds of tasks scheduled on
   :src:`HashedWheelTimer.Default <com/twitter/finagle/util/HashedWheelTimer.scala>`
   from their expected time.
+
+**finagle/timer/slow**
+  A counter of the number of tasks found to be executing for longer
+  than 2 seconds.
 
 ClientRegistry
 <<<<<<<<<<<<<<
@@ -97,40 +117,41 @@ These metrics are exported from Finagle's underlying transport
 implementation, the Netty 4 library and available under `finagle/netty4`
 on any instance running Finagle with Netty 4.
 
-NOTE: All pooling metrics are only exported when pooling is enabled
-      (default: disabled) and only account for direct memory.
-
-**pooling/allocations/huge**
-  A gauge (a counter) of total number of HUGE *direct allocations*
+**pooling/allocations/huge** `verbosity:debug`
+  A gauge of the total number of HUGE *direct allocations*
   (i.e., unpooled allocations that exceed the current chunk size).
 
-**pooling/allocations/normal**
-  A gauge (a counter) of total number of NORMAL *direct allocations*
+**pooling/allocations/normal** `verbosity:debug`
+  A gauge of the total number of NORMAL *direct allocations*
   (i.e., less than a current chunk size).
 
-**pooling/allocations/small**
-  A gauge (a counter) of total number of SMALL *direct allocations*
+**pooling/allocations/small** `verbosity:debug`
+  A gauge of the total number of SMALL *direct allocations*
   (i.e., less than a page size, 8192 bytes).
 
-**pooling/allocations/tiny**
-  A gauge (a counter) of total number of TINY *direct allocations*
+**pooling/allocations/tiny** `verbosity:debug`
+  A gauge of the total number of TINY *direct allocations*
   (i.e., less than 512 bytes).
 
-**pooling/deallocations/huge**
-  A gauge (a counter) of total number of HUGE *direct deallocations*
+**pooling/deallocations/huge** `verbosity:debug`
+  A gauge of the total number of HUGE *direct deallocations*
   (i.e., unpooled allocations that exceed the current chunk size).
 
-**pooling/deallocations/normal**
-  A gauge (a counter) of total number of NORMAL *direct deallocations*
+**pooling/deallocations/normal** `verbosity:debug`
+  A gauge of the total number of NORMAL *direct deallocations*
   (i.e., less than a chunk size).
 
-**pooling/deallocations/small**
-  A gauge (a counter) of total number of SMALL *direct deallocations*
+**pooling/deallocations/small** `verbosity:debug`
+  A gauge of the total number of SMALL *direct deallocations*
   (i.e., less than a page size, 8192 bytes).
 
-**pooling/deallocations/tiny**
-  A gauge (a counter) of total number of TINY *direct deallocations*
+**pooling/deallocations/tiny** `verbosity:debug`
+  A gauge of the total number of TINY *direct deallocations*
   (i.e., less than 512 bytes).
+
+**pooling/used*** `verbosity:debug`
+  A gauge of the number of bytes used for *direct allocations*.
+
 
 **reference_leaks**
   A counter of detected reference leaks. See longer note on 

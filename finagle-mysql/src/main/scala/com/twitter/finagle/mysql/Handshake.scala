@@ -16,27 +16,33 @@ class IncompatibleServerError(msg: String) extends Exception(msg)
  * a version of MySQL that the client is incompatible with.
  */
 case object IncompatibleVersion
-  extends IncompatibleServerError(
-    "This client is only compatible with MySQL version 4.1 and later"
-  )
+    extends IncompatibleServerError(
+      "This client is only compatible with MySQL version 4.1 and later"
+    )
 
 /**
  * Indicates that the server to which the client is connected is configured to use
  * a charset that the client is incompatible with.
  */
 case object IncompatibleCharset
-  extends IncompatibleServerError(
-    "This client is only compatible with UTF-8 and Latin-1 charset encoding"
-  )
+    extends IncompatibleServerError(
+      "This client is only compatible with UTF-8 and Latin-1 charset encoding"
+    )
 
 object Handshake {
+
   /**
    * A class eligible for configuring a mysql client's credentials during
    * the Handshake phase.
    */
   case class Credentials(username: Option[String], password: Option[String])
   implicit object Credentials extends Stack.Param[Credentials] {
-    val default = Credentials(None, None)
+    val default: Credentials = Credentials(None, None)
+
+    override def show(p: Credentials): Seq[(String, () => String)] = {
+      // do not show the password for security reasons
+      Seq(("username", () => p.username.getOrElse("")))
+    }
   }
 
   /**
@@ -45,7 +51,7 @@ object Handshake {
    */
   case class Database(db: Option[String])
   implicit object Database extends Stack.Param[Database] {
-    val default = Database(None)
+    val default: Database = Database(None)
   }
 
   /**
@@ -54,21 +60,29 @@ object Handshake {
    */
   case class Charset(charset: Short)
   implicit object Charset extends Stack.Param[Charset] {
-    val default = Charset(Utf8_general_ci)
+    val default: Charset = Charset(Utf8_general_ci)
+  }
+
+  /**
+    * A class eligible for configuring a mysql client's CLIENT_FOUND_ROWS flag
+    * during the Handshake phase.
+    */
+  case class FoundRows(enabled: Boolean)
+  implicit object FoundRows extends Stack.Param[FoundRows] {
+    val default: FoundRows = FoundRows(true)
   }
 
   /**
    * Creates a Handshake from a collection of [[com.twitter.finagle.Stack.Params]].
    */
   def apply(prms: Stack.Params): Handshake = {
-    val Credentials(u, p) = prms[Credentials]
-    val Database(db) = prms[Database]
-    val Charset(cs) = prms[Charset]
+    val credentials = prms[Credentials]
     Handshake(
-      username = u,
-      password = p,
-      database = db,
-      charset = cs
+      username = credentials.username,
+      password = credentials.password,
+      database = prms[Database].db,
+      charset = prms[Charset].charset,
+      enableFoundRows = prms[FoundRows].enabled
     )
   }
 }
@@ -89,6 +103,10 @@ object Handshake {
  *
  * @param charset default character established with the server.
  *
+ * @param enableFoundRows if the server should return the number
+ * of found (matched) rows, not the number of changed rows for
+ * UPDATE and INSERT ... ON DUPLICATE KEY UPDATE statements.
+ *
  * @param maxPacketSize max size of a command packet that the
  * client intends to send to the server. The largest possible
  * packet that can be transmitted to or from a MySQL 5.5 server or
@@ -103,36 +121,45 @@ case class Handshake(
   database: Option[String] = None,
   clientCap: Capability = Capability.baseCap,
   charset: Short = Utf8_general_ci,
+  enableFoundRows: Boolean = true,
   maxPacketSize: StorageUnit = 1.gigabyte
 ) extends (HandshakeInit => Try[HandshakeResponse]) {
   import Capability._
   require(maxPacketSize <= 1.gigabyte, "max packet size can't exceed 1 gigabyte")
 
-  private[this] val newClientCap =
-    if (database.isDefined) clientCap + ConnectWithDB
-    else clientCap - ConnectWithDB
+  private[this] val newClientCap = {
+    val capDb = if (database.isDefined) {
+      clientCap + ConnectWithDB
+    } else {
+      clientCap - ConnectWithDB
+    }
+
+    if (enableFoundRows) capDb + FoundRows
+    else capDb - FoundRows
+  }
 
   private[this] def isCompatibleVersion(init: HandshakeInit) =
-    if (init.serverCap.has(Capability.Protocol41)) Return(true)
+    if (init.serverCap.has(Capability.Protocol41)) Return.True
     else Throw(IncompatibleVersion)
 
   private[this] def isCompatibleCharset(init: HandshakeInit) =
-    if (Charset.isCompatible(init.charset)) Return(true)
+    if (Charset.isCompatible(init.charset)) Return.True
     else Throw(IncompatibleCharset)
 
-  def apply(init: HandshakeInit) = {
+  def apply(init: HandshakeInit): Try[HandshakeResponse] = {
     for {
       _ <- isCompatibleVersion(init)
       _ <- isCompatibleCharset(init)
-    } yield HandshakeResponse(
-      username,
-      password,
-      database,
-      newClientCap,
-      init.salt,
-      init.serverCap,
-      charset,
-      maxPacketSize.inBytes.toInt
-    )
+    } yield
+      HandshakeResponse(
+        username,
+        password,
+        database,
+        newClientCap,
+        init.salt,
+        init.serverCap,
+        charset,
+        maxPacketSize.inBytes.toInt
+      )
   }
 }

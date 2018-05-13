@@ -9,11 +9,11 @@ import com.twitter.util.Future
  */
 class ClientFailHttp2UpgradeTest extends AbstractHttp1EndToEndTest {
   def implName: String = "http/2 client, http/1.1 server"
-  def clientImpl(): finagle.Http.Client = finagle.Http.client.configuredParams(finagle.Http.Http2)
+  def clientImpl(): finagle.Http.Client = finagle.Http.client.withHttp2
 
   def serverImpl(): finagle.Http.Server = finagle.Http.server
 
-  def featureImplemented(feature: Feature): Boolean = true
+  def featureImplemented(feature: Feature): Boolean = feature != NoBodyMessage
 
   test("Upgrade counters are not incremented") {
     val client = nonStreamingConnect(Service.mk { req: Request =>

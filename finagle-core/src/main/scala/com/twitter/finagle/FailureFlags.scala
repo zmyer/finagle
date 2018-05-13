@@ -45,6 +45,11 @@ object FailureFlags {
   val NonRetryable: Long = 1L << 4
 
   /**
+   * Ignorable indicates that this failure can be ignored and should not be surfaced via stats.
+   */
+  private[twitter] val Ignorable: Long = 1L << 5
+
+  /**
    * Naming indicates a naming failure. This is Finagle-internal.
    */
   private[finagle] val Naming: Long = 1L << 32
@@ -65,13 +70,22 @@ object FailureFlags {
    */
   def flagsOf(flags: Long): Set[String] = {
     var names: Set[String] = Set.empty
-    if ((flags & Interrupted) > 0)  names += "interrupted"
-    if ((flags & Retryable) > 0)    names += "restartable" // See doc
-    if ((flags & Wrapped) > 0)      names += "wrapped"
-    if ((flags & Rejected) > 0)     names += "rejected"
-    if ((flags & Naming) > 0)       names += "naming"
+    if ((flags & Interrupted) > 0) names += "interrupted"
+    if ((flags & Retryable) > 0) names += "restartable" // See doc
+    if ((flags & Wrapped) > 0) names += "wrapped"
+    if ((flags & Rejected) > 0) names += "rejected"
+    if ((flags & Naming) > 0) names += "naming"
     if ((flags & NonRetryable) > 0) names += "nonretryable"
     names
+  }
+
+  /**
+   * Expose flags of a given throwable as strings. Here, Retryable is named
+   * "restartable" for now to maintain compatibility with existing stats.
+   */
+  def flagsOf(e: Throwable): Set[String] = e match {
+    case f: FailureFlags[_] => flagsOf(f.flags)
+    case _ => Set.empty
   }
 
   /**
@@ -84,6 +98,14 @@ object FailureFlags {
       case Throw(exn) => Future.exception(Failure(exn, FailureFlags.NonRetryable))
       case _ => Future.const(t)
     }
+  }
+
+  /**
+   * A way for non-finagle folks to test if a throwable is flagged
+   */
+  def isFlagged(flags: Long)(t: Throwable): Boolean = t match {
+    case f: FailureFlags[_] => f.isFlagged(flags)
+    case _ => false
   }
 }
 
@@ -121,6 +143,9 @@ private[finagle] trait FailureFlags[T <: FailureFlags[T]] extends Throwable { th
    * A copy of this object with the given flags replacing the current flags. The
    * caller of this method should check to see if a copy is necessary before
    * calling.
+   *
+   * As this is an internal API, the other `Throwable` fields such as the cause
+   * and stack trace should be handled by callers.
    */
   protected def copyWithFlags(flags: Long): T
 
@@ -128,7 +153,19 @@ private[finagle] trait FailureFlags[T <: FailureFlags[T]] extends Throwable { th
    * This with the current flags replaced by newFlags. This does not mutate.
    */
   private[finagle] def withFlags(newFlags: Long): T =
-    if (flags == newFlags) this else copyWithFlags(newFlags)
+    if (newFlags == flags) {
+      this
+    } else {
+      val copied = copyWithFlags(newFlags)
+      copied.setStackTrace(getStackTrace)
+      if (getCause != null && copied.getCause == null) {
+        copied.initCause(getCause)
+      }
+      getSuppressed.toSeq.foreach { t =>
+        copied.addSuppressed(t)
+      }
+      copied
+    }
 
   /**
    * This with the given flags added. This does not mutate.

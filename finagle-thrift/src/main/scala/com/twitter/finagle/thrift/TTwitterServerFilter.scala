@@ -23,7 +23,8 @@ private[finagle] class TTwitterServerFilter(
   private[this] lazy val successfulUpgradeReply = Future {
     val buffer = new OutputBuffer(protocolFactory)
     buffer().writeMessageBegin(
-      new TMessage(ThriftTracing.CanTraceMethodName, TMessageType.REPLY, 0))
+      new TMessage(ThriftTracing.CanTraceMethodName, TMessageType.REPLY, 0)
+    )
     val upgradeReply = new thrift.UpgradeReply
     upgradeReply.write(buffer())
     buffer().writeMessageEnd()
@@ -52,11 +53,6 @@ private[finagle] class TTwitterServerFilter(
         // as it really requires a dispatcher.
         Dtab.local ++= richHeader.dtab
 
-        Trace.recordRpc({
-          val msg = new InputBuffer(request_, protocolFactory)().readMessageBegin()
-          msg.name
-        })
-
         // If `header.client_id` field is non-null, then allow it to take
         // precedence over an id potentially provided by in the key-value pairs
         // when performing tracing.
@@ -80,7 +76,8 @@ private[finagle] class TTwitterServerFilter(
                 val responseHeader = new thrift.ResponseHeader
                 ByteArrays.concat(
                   OutputBuffer.messageToArray(responseHeader, protocolFactory),
-                  response)
+                  response
+                )
             }
           }
         }
@@ -91,7 +88,7 @@ private[finagle] class TTwitterServerFilter(
 
       // TODO: only try once?
       if (msg.`type` == TMessageType.CALL &&
-          msg.name == ThriftTracing.CanTraceMethodName) {
+        msg.name == ThriftTracing.CanTraceMethodName) {
 
         val connectionOptions = new thrift.ConnectionOptions
         connectionOptions.read(buffer())
@@ -101,7 +98,6 @@ private[finagle] class TTwitterServerFilter(
         successfulUpgradeReply
       } else {
         // request from client without tracing support
-        Trace.recordRpc(msg.name)
         Trace.recordBinary("srv/thrift/ttwitter", false)
         service(request)
       }

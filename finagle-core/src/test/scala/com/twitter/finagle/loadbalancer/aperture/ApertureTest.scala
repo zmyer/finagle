@@ -1,42 +1,57 @@
 package com.twitter.finagle.loadbalancer.aperture
 
-import com.twitter.finagle.loadbalancer.NodeT
-import com.twitter.finagle.service.FailingFactory
-import com.twitter.finagle.stats.{StatsReceiver, NullStatsReceiver}
+import com.twitter.finagle.Address.Inet
+import com.twitter.finagle._
+import com.twitter.finagle.loadbalancer.{EndpointFactory, FailingEndpointFactory, NodeT}
+import com.twitter.finagle.stats.{InMemoryStatsReceiver, NullStatsReceiver, StatsReceiver}
+import com.twitter.finagle.toggle
 import com.twitter.finagle.util.Rng
-import com.twitter.finagle.{ServiceFactory, ServiceFactoryProxy}
-import com.twitter.finagle.{NoBrokersAvailableException, Status}
-import com.twitter.util.{Activity, Await, Duration}
-import org.scalatest.FunSuite
+import com.twitter.util.{Activity, Await, Duration, NullTimer}
+import java.net.InetSocketAddress
+import org.scalactic.source.Position
+import org.scalatest.{FunSuite, Tag}
 
 class ApertureTest extends FunSuite with ApertureSuite {
+
   /**
-   * @note We don't mix in a controller for the aperture. This means that the aperture
-   * will not expand or contract automatically. Thus, each test in this suite must
-   * manually adjust it or rely on the "rebuild" functionality provided by [[Balancer]]
-   * which kicks in when we select a down node. Since aperture uses P2C to select
-   * nodes, we inherit the same probabilistic properties that help us avoid down
-   * nodes with the important caveat that we only select over a subset.
+   * A simple aperture balancer which doesn't have a controller or load metric
+   * mixed in since we only want to test the aperture behavior exclusive of
+   * these.
+   *
+   * This means that the aperture will not expand or contract automatically. Thus, each
+   * test in this suite must manually adjust it or rely on the "rebuild" functionality
+   * provided by [[Balancer]] which kicks in when we select a down node. Since aperture
+   * uses P2C to select nodes, we inherit the same probabilistic properties that help
+   * us avoid down nodes with the important caveat that we only select over a subset.
    */
   private class Bal extends TestBal {
-    protected class Node(val factory: ServiceFactory[Unit, Unit])
-      extends ServiceFactoryProxy[Unit, Unit](factory)
-      with NodeT[Unit, Unit] {
+    protected def statsReceiver: StatsReceiver = NullStatsReceiver
+    protected class Node(val factory: EndpointFactory[Unit, Unit])
+        extends ServiceFactoryProxy[Unit, Unit](factory)
+        with NodeT[Unit, Unit]
+        with ApertureNode {
       // We don't need a load metric since this test only focuses on
       // the internal behavior of aperture.
+      def id: Int = 0
       def load: Double = 0
       def pending: Int = 0
-      def token: Int = 0
+      override val token: Int = 0
     }
 
-    protected def newNode(
-      factory: ServiceFactory[Unit, Unit],
-      statsReceiver: StatsReceiver
-    ): Node = new Node(factory)
+    protected def newNode(factory: EndpointFactory[Unit, Unit]): Node =
+      new Node(factory)
 
     protected def failingNode(cause: Throwable): Node =
-      new Node(new FailingFactory[Unit, Unit](cause))
+      new Node(new FailingEndpointFactory[Unit, Unit](cause))
   }
+
+  // Ensure the flag value is 12 since many of the tests depend on it.
+  override protected def test(testName: String,testTags: Tag*)(testFun: => Any)(implicit pos: Position): Unit =
+    super.test(testName, testTags:_*) {
+      minDeterminsticAperture.let(12) {
+        testFun
+      }
+    }
 
   test("requires minAperture > 0") {
     intercept[IllegalArgumentException] {
@@ -49,8 +64,10 @@ class ApertureTest extends FunSuite with ApertureSuite {
         maxEffort = 0,
         rng = Rng.threadLocal,
         statsReceiver = NullStatsReceiver,
+        label = "",
+        timer = new NullTimer,
         emptyException = new NoBrokersAvailableException,
-        useDeterministicOrdering = false
+        useDeterministicOrdering = None
       )
     }
   }
@@ -90,13 +107,23 @@ class ApertureTest extends FunSuite with ApertureSuite {
   test("Empty vectors") {
     val bal = new Bal
     intercept[Empty] { Await.result(bal.apply()) }
+
+    // transient update
+    val counts = new Counts
+    bal.update(counts.range(5))
+    bal.applyn(100)
+    assert(counts.nonzero.size > 0)
+
+    // go back to zero
+    bal.update(Vector.empty)
+    intercept[Empty] { Await.result(bal.apply()) }
   }
 
   test("Balance only within the aperture") {
     val counts = new Counts
     val bal = new Bal
     bal.update(counts.range(10))
-    assert(bal.unitsx == 10)
+    assert(bal.maxUnitsx == 10)
     bal.applyn(100)
     assert(counts.nonzero.size == 1)
 
@@ -110,7 +137,7 @@ class ApertureTest extends FunSuite with ApertureSuite {
     assert(counts.nonzero.size == 1)
   }
 
-  test("Enforce min aperture size is not > the number of active nodes") {
+  test("min aperture size is not > the number of active nodes") {
     val counts = new Counts
     val bal = new Bal {
       override protected val minAperture = 4
@@ -168,16 +195,16 @@ class ApertureTest extends FunSuite with ApertureSuite {
       closed0.status = unavailableStatus
       closed1.status = unavailableStatus
 
-      val closed0Req = closed0.n
-      val closed1Req = closed1.n
+      val closed0Req = closed0.total
+      val closed1Req = closed1.total
 
       bal.applyn(100)
 
       // We want to make sure that we haven't sent requests to the
       // `Closed` nodes since our aperture is wide enough to avoid
       // them.
-      assert(closed0Req == closed0.n)
-      assert(closed1Req == closed1.n)
+      assert(closed0Req == closed0.total)
+      assert(closed1Req == closed1.total)
     }
   }
 
@@ -203,75 +230,161 @@ class ApertureTest extends FunSuite with ApertureSuite {
     assert(counts.nonzero == Set(goodkey))
   }
 
-  test("useDeterministicOrdering") {
+  test("useDeterministicOrdering, clients evenly divide servers") {
+    val counts = new Counts
     val bal = new Bal {
-      override protected val useDeterministicOrdering = true
+      override protected val useDeterministicOrdering = Some(true)
     }
 
-    DeterministicOrdering.unsetCoordinate()
+    ProcessCoordinate.setCoordinate(peerOffset = 0, instanceId = 0, totalInstances = 12)
+    bal.update(counts.range(24))
+    bal.rebuildx()
+    assert(bal.isDeterministicAperture)
+    assert(bal.minUnitsx == 12)
+    bal.applyn(2000)
 
-    val servers = Vector.tabulate(10) { i => new Factory(i) }
+    assert(counts.nonzero == (0 to 11).toSet)
+  }
 
-    val distSnap = bal.distx
-    bal.update(servers)
-    assert(distSnap ne bal.distx)
-    assert(servers.indices.forall { i => bal.distx.vector(i) == servers(i) })
+  test("useDeterministicOrdering, clients unevenly divide servers") {
+    val counts = new Counts
+    val bal = new Bal {
+      override protected val useDeterministicOrdering = Some(true)
+    }
 
-    DeterministicOrdering.setCoordinate(offset = 0, instanceId = 1, totalInstances = 10)
-    bal.update(servers)
-    assert(servers.indices.exists { i => bal.distx.vector(i) != servers(i) })
+    ProcessCoordinate.setCoordinate(peerOffset = 0, instanceId = 1, totalInstances = 4)
+    bal.update(counts.range(18))
+    bal.rebuildx()
+    assert(bal.isDeterministicAperture)
+    assert(bal.minUnitsx == 12)
+    bal.applyn(2000)
+
+    // Need at least 48 connections to satisfy min of 12, so we have to circle the ring 3 times (N=3)
+    // to get 48 virtual servers. Instance 1 offset: 0.25, width: 3*0.25 = 0.75 resulting in
+    // covering three quarters the servers, or 14 server units.
+    // Our instance 1 offset is 0.25, which maps to server instance 18*0.25=4.5 as the start of its
+    // aperture and ends at 18.0, meaning that server instances 4 through 17 are in its physical
+    // aperture and 4 should get ~1/2 the load of the rest in this clients aperture.
+    assert(counts.nonzero == (4 to 17).toSet)
+    assert(math.abs(counts(4).total.toDouble / counts(5).total - 0.5) <= 0.1)
+    assert(math.abs(counts(17).total.toDouble / counts(12).total - 1.0) <= 0.1)
   }
 
   test("no-arg rebuilds are idempotent") {
     val bal = new Bal {
-      override protected val useDeterministicOrdering = true
+      override protected val useDeterministicOrdering = Some(true)
     }
 
-    DeterministicOrdering.setCoordinate(0, 5, 10)
+    ProcessCoordinate.setCoordinate(0, 5, 10)
 
-    val servers = Vector.tabulate(10) { i => new Factory(i) }
+    val servers = Vector.tabulate(10)(Factory)
     bal.update(servers)
 
     val order = bal.distx.vector
     for (_ <- 0 to 100) {
-      // This shouldn't affect order since we don't have a new
-      // coordinate. Thus, the rebuild should be a no-op for
-      // the ordering.
       bal.rebuildx()
-      assert(order.indices.forall { i => order(i) == bal.distx.vector(i) })
+      assert(order.indices.forall { i =>
+        order(i) == bal.distx.vector(i)
+      })
     }
   }
 
-  test("min aperture when using DeterministicOrdering") {
-    var min: Int = 1
+  test("order maintained when status flaps") {
     val bal = new Bal {
-      override protected def minAperture = min
-      override protected val useDeterministicOrdering = true
+      override protected val useDeterministicOrdering = Some(true)
     }
 
-    val numServers = 20
-    val numClients = 6
-    val offset = 0
+    ProcessCoordinate.unsetCoordinate()
 
-    bal.update(Vector.tabulate(numServers) { i => new Factory(i) })
+    val servers = Vector.tabulate(5)(Factory)
+    bal.update(servers)
 
-    for (i <- 0 until numClients) {
-      DeterministicOrdering.setCoordinate(offset, i, numClients)
-      // force a rebuild here since we don't want to be at the mercy
-      // of the balancer's updater.
+    // 3 of 5 servers are in the aperture
+    bal.adjustx(2)
+    assert(bal.aperturex == 3)
+
+    ProcessCoordinate.setCoordinate(peerOffset = 0, instanceId = 3, totalInstances = 5)
+
+    // We just happen to know that based on our ordering, instance 2 is in the aperture.
+    // Note, we have an aperture of 3 and 1 down, so the probability of picking the down
+    // node with p2c is ((1/3)^2)^maxEffort . Instead of attempting to hit this case, we
+    // force a rebuild artificially.
+    servers(2).status = Status.Busy
+    bal.rebuildx()
+    for (i <- servers.indices) {
+      assert(servers(i) == bal.distx.vector(i).factory)
+    }
+
+    // flip back status
+    servers(2).status = Status.Open
+    bal.rebuildx()
+    for (i <- servers.indices) {
+      assert(servers(i) == bal.distx.vector(i).factory)
+    }
+  }
+
+  test("daperture toggle") {
+    toggle.flag.overrides.let(Aperture.dapertureToggleKey, 1.0) {
+      val bal = new Bal {
+        override val minAperture = 150
+      }
+      ProcessCoordinate.setCoordinate(0, 0, 150)
+      bal.update(Vector.tabulate(150)(Factory))
       bal.rebuildx()
-      assert(bal.aperturex == math.ceil(numServers / numClients.toDouble))
+      assert(bal.isDeterministicAperture)
+      // ignore 150, since we are using d-aperture and instead
+      // default to 12.
+      assert(bal.minUnitsx == 12)
     }
 
-    // still respect the min passed in by the user so long as it's greater
-    // than the min required to cover the ring.
-    min = numClients
-    for (i <- 0 until numClients) {
-      DeterministicOrdering.setCoordinate(offset, i, numClients)
-      // force a rebuild here since we don't want to be at the mercy
-      // of the balancer's updater.
+    toggle.flag.overrides.let(Aperture.dapertureToggleKey, 0.0) {
+      val bal = new Bal {
+        override val minAperture = 150
+      }
+      ProcessCoordinate.setCoordinate(0, 0, 150)
+      bal.update(Vector.tabulate(150)(Factory))
       bal.rebuildx()
-      assert(bal.aperturex == numClients)
+      assert(bal.isRandomAperture)
+      assert(bal.minUnitsx == 150)
     }
+  }
+
+  test("vectorHash") {
+
+    class WithAddressFactory(i: Int, addr: InetSocketAddress) extends Factory(i) {
+      override def address: Address = Inet(addr, Addr.Metadata.empty)
+    }
+
+    val sr = new InMemoryStatsReceiver
+
+    def getVectorHash: Float = sr.gauges(Seq("vector_hash")).apply()
+
+    val bal = new Bal {
+      override protected def statsReceiver = sr
+    }
+
+    def updateWithIps(ips: Vector[String]): Unit = bal.update(ips.map { addr =>
+      new WithAddressFactory(addr.##, new InetSocketAddress(addr, 80))
+    })
+
+    updateWithIps(Vector("1.1.1.1", "1.1.1.2"))
+    val hash1 = getVectorHash
+
+    updateWithIps(Vector("1.1.1.1", "1.1.1.3"))
+    val hash2 = getVectorHash
+
+    assert(hash1 != hash2)
+
+    // Doesn't have hysteresis
+    updateWithIps(Vector("1.1.1.1", "1.1.1.2"))
+    val hash3 = getVectorHash
+
+    assert(hash1 == hash3)
+
+    // Permutations have different hash codes
+    updateWithIps(Vector("1.1.1.2", "1.1.1.1"))
+    val hash4 = getVectorHash
+
+    assert(hash1 != hash4)
   }
 }

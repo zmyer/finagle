@@ -1,12 +1,16 @@
 package com.twitter.finagle.thrift
 
-import com.google.common.base.Charsets
 import com.twitter.finagle.stats.{Counter, DefaultStatsReceiver, StatsReceiver}
 import com.twitter.logging.Logger
 import java.nio.{ByteBuffer, CharBuffer}
-import java.nio.charset.{CharsetEncoder, CoderResult, CodingErrorAction}
+import java.nio.charset.{CharsetEncoder, CoderResult, CodingErrorAction, StandardCharsets}
 import java.security.{PrivilegedExceptionAction, AccessController}
-import org.apache.thrift.protocol.{TProtocol, TProtocolFactory, TBinaryProtocol}
+import org.apache.thrift.protocol.{
+  TMultiplexedProtocol,
+  TProtocol,
+  TProtocolFactory,
+  TBinaryProtocol
+}
 import org.apache.thrift.transport.TTransport
 import scala.util.control.NonFatal
 
@@ -33,7 +37,7 @@ object Protocols {
             }
           })
         } catch {
-          case NonFatal(t) =>
+          case NonFatal(_) =>
             Logger.get().info("%s unable to initialize sun.misc.Unsafe", getClass.getName)
             null
         }
@@ -50,7 +54,36 @@ object Protocols {
     case _: Throwable => false
   }
 
+  /**
+   * The JVM property of size limit on the incoming Thrift message
+   */
+  private[thrift] val SysPropReadLength: Long =
+    System.getProperty("org.apache.thrift.readLength", "-1").toLong
+
+  /**
+   * No size limit on the incoming Thrift message, value is -1
+   */
+  private[thrift] val NoReadLimit: Int = -1
+
   private[this] def optimizedBinarySupported: Boolean = unsafe.isDefined && StringsBackedByCharArray
+
+  /**
+   * Returns a shorter read size limit when it is set both by system property and a method parameter
+   *
+   * @param readLength method parameter
+   */
+  private[thrift] def getReadLimit(readLength: Long): Long = {
+    val readLengthOption = if (readLength <= NoReadLimit) None else Some(readLength)
+    val sysPropReadLengthOption =
+      if (SysPropReadLength <= NoReadLimit) None else Some(SysPropReadLength)
+
+    (readLengthOption, sysPropReadLengthOption) match {
+      case (Some(validatedReadLength), Some(validatedSystemLength)) =>
+        validatedReadLength.min(validatedSystemLength)
+      case (validatedReadLength, validatedSystemLength) =>
+        validatedReadLength.orElse(validatedSystemLength).getOrElse(NoReadLimit)
+    }
+  }
 
   /**
    * Returns a `TProtocolFactory` that creates `TProtocol`s that
@@ -59,23 +92,26 @@ object Protocols {
   def binaryFactory(
     strictRead: Boolean = false,
     strictWrite: Boolean = true,
-    readLength: Int = 0,
+    readLength: Long = -1,
     statsReceiver: StatsReceiver = DefaultStatsReceiver
   ): TProtocolFactory = {
+    val readLengthLimit: Long = getReadLimit(readLength)
     if (!optimizedBinarySupported) {
-      new TBinaryProtocol.Factory(strictRead, strictWrite, readLength)
+      new TBinaryProtocol.Factory(strictRead, strictWrite, readLengthLimit, NoReadLimit)
     } else {
       // Factories are created rarely while the creation of their TProtocol's
       // is a common event. Minimize counter creation to just once per Factory.
       val largerThanTlOutBuffer = statsReceiver.counter("larger_than_threadlocal_out_buffer")
       new TProtocolFactory {
         override def getProtocol(trans: TTransport): TProtocol = {
-          val proto = new TFinagleBinaryProtocol(
-            trans, largerThanTlOutBuffer, strictRead, strictWrite)
-          if (readLength != 0) {
-            proto.setReadLength(readLength)
-          }
-          proto
+          new TFinagleBinaryProtocol(
+            trans,
+            largerThanTlOutBuffer,
+            readLengthLimit,
+            NoReadLimit,
+            strictRead,
+            strictWrite
+          )
         }
       }
     }
@@ -83,6 +119,14 @@ object Protocols {
 
   def factory(statsReceiver: StatsReceiver = DefaultStatsReceiver): TProtocolFactory = {
     binaryFactory(statsReceiver = statsReceiver)
+  }
+
+  def multiplex(serviceName: String, protocolFactory: TProtocolFactory): TProtocolFactory = {
+    new TProtocolFactory {
+      def getProtocol(transport: TTransport): TMultiplexedProtocol = {
+        new TMultiplexedProtocol(protocolFactory.getProtocol(transport), serviceName)
+      }
+    }
   }
 
   // Visible for testing purposes.
@@ -95,37 +139,44 @@ object Protocols {
     private val MultiByteMultiplierEstimate = 3.0f
 
     /** Only valid if unsafe is defined */
-    private val StringValueOffset: Long = unsafe.map {
-      _.objectFieldOffset(classOf[String].getDeclaredField("value"))
-    }.getOrElse(Long.MinValue)
+    private val StringValueOffset: Long = unsafe
+      .map {
+        _.objectFieldOffset(classOf[String].getDeclaredField("value"))
+      }
+      .getOrElse(Long.MinValue)
 
     /**
      * Note, some versions of the JDK's define `String.offset`,
      * while others do not and always use 0.
      */
-    private val OffsetValueOffset: Long = unsafe.map { u =>
-      try {
-        u.objectFieldOffset(classOf[String].getDeclaredField("offset"))
-      } catch {
-        case NonFatal(_) => Long.MinValue
+    private val OffsetValueOffset: Long = unsafe
+      .map { u =>
+        try {
+          u.objectFieldOffset(classOf[String].getDeclaredField("offset"))
+        } catch {
+          case NonFatal(_) => Long.MinValue
+        }
       }
-    }.getOrElse(Long.MinValue)
+      .getOrElse(Long.MinValue)
 
     /**
      * Note, some versions of the JDK's define `String.count`,
      * while others do not and always use `value.length`.
      */
-    private val CountValueOffset: Long = unsafe.map { u =>
-      try {
-        u.objectFieldOffset(classOf[String].getDeclaredField("count"))
-      } catch {
-        case NonFatal(_) => Long.MinValue
+    private val CountValueOffset: Long = unsafe
+      .map { u =>
+        try {
+          u.objectFieldOffset(classOf[String].getDeclaredField("count"))
+        } catch {
+          case NonFatal(_) => Long.MinValue
+        }
       }
-    }.getOrElse(Long.MinValue)
+      .getOrElse(Long.MinValue)
 
     private val charsetEncoder = new ThreadLocal[CharsetEncoder] {
-      override def initialValue() =
-        Charsets.UTF_8.newEncoder()
+      override def initialValue(): CharsetEncoder =
+        StandardCharsets.UTF_8
+          .newEncoder()
           .onMalformedInput(CodingErrorAction.REPLACE)
           .onUnmappableCharacter(CodingErrorAction.REPLACE)
     }
@@ -134,7 +185,7 @@ object Protocols {
     private[thrift] val OutBufferSize = 16384
 
     private val outByteBuffer = new ThreadLocal[ByteBuffer] {
-      override def initialValue() = ByteBuffer.allocate(OutBufferSize)
+      override def initialValue(): ByteBuffer = ByteBuffer.allocate(OutBufferSize)
     }
   }
 
@@ -148,15 +199,19 @@ object Protocols {
    * Visible for testing purposes.
    */
   private[thrift] class TFinagleBinaryProtocol(
-      trans: TTransport,
-      largerThanTlOutBuffer: Counter,
-      strictRead: Boolean = false,
-      strictWrite: Boolean = true)
-    extends TBinaryProtocol(
-      trans,
-      strictRead,
-      strictWrite)
-  {
+    trans: TTransport,
+    largerThanTlOutBuffer: Counter,
+    stringLengthLimit: Long = -1,
+    containerLengthLimit: Long = -1,
+    strictRead: Boolean = false,
+    strictWrite: Boolean = true
+  ) extends TBinaryProtocol(
+        trans,
+        stringLengthLimit,
+        containerLengthLimit,
+        strictRead,
+        strictWrite
+      ) {
     import TFinagleBinaryProtocol._
 
     override def writeString(str: String) {
@@ -170,12 +225,16 @@ object Protocols {
       // https://github.com/nitsanw/jmh-samples/blob/master/src/main/java/psy/lob/saw/utf8/CustomUtf8Encoder.java
       val u = unsafe.get
       val chars = u.getObject(str, StringValueOffset).asInstanceOf[Array[Char]]
-      val offset = if (OffsetValueOffset == Long.MinValue) 0 else {
-        u.getInt(str, OffsetValueOffset)
-      }
-      val count = if (CountValueOffset == Long.MinValue) chars.length else {
-        u.getInt(str, CountValueOffset)
-      }
+      val offset =
+        if (OffsetValueOffset == Long.MinValue) 0
+        else {
+          u.getInt(str, OffsetValueOffset)
+        }
+      val count =
+        if (CountValueOffset == Long.MinValue) chars.length
+        else {
+          u.getInt(str, CountValueOffset)
+        }
 
       val out = if (count * MultiByteMultiplierEstimate <= OutBufferSize) {
         val o = outByteBuffer.get()
@@ -195,7 +254,7 @@ object Protocols {
           out.position(blen)
         case _ =>
           val charBuffer = CharBuffer.wrap(chars, offset, count)
-          csEncoder.encode(charBuffer, out, true /* endOfInput */) != CoderResult.UNDERFLOW
+          csEncoder.encode(charBuffer, out, true /* endOfInput */ ) != CoderResult.UNDERFLOW
       }
 
       writeI32(out.position())
@@ -216,7 +275,6 @@ object Protocols {
         trans.write(array, 0, array.length)
       }
     }
-
   }
 
 }

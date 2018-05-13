@@ -41,10 +41,10 @@ class Netty4ClientEngineFactoryTest extends FunSuite {
   }
 
   test("config with good cert and key credentials succeeds") {
-    val tempCertFile = TempFile.fromResourcePath("/ssl/certs/test-rsa.crt")
+    val tempCertFile = TempFile.fromResourcePath("/ssl/certs/svc-test-client.cert.pem")
     // deleteOnExit is handled by TempFile
 
-    val tempKeyFile = TempFile.fromResourcePath("/ssl/keys/test-pkcs8.key")
+    val tempKeyFile = TempFile.fromResourcePath("/ssl/keys/svc-test-client-pkcs8.key.pem")
     // deleteOnExit is handled by TempFile
 
     val keyCredentials = KeyCredentials.CertAndKey(tempCertFile, tempKeyFile)
@@ -59,30 +59,50 @@ class Netty4ClientEngineFactoryTest extends FunSuite {
     val tempCertFile = File.createTempFile("test", "crt")
     tempCertFile.deleteOnExit()
 
-    val tempKeyFile = TempFile.fromResourcePath("/ssl/keys/test-pkcs8.key")
+    val tempKeyFile = TempFile.fromResourcePath("/ssl/keys/svc-test-client-pkcs8.key.pem")
     // deleteOnExit is handled by TempFile
 
     val keyCredentials = KeyCredentials.CertAndKey(tempCertFile, tempKeyFile)
     val config = SslClientConfiguration(keyCredentials = keyCredentials)
 
-    intercept[IllegalArgumentException] {
+    intercept[SslConfigurationException] {
       val engine = factory(address, config)
     }
   }
 
-  test("config with cert, key, and chain fails") {
-    val tempCertFile = TempFile.fromResourcePath("/ssl/certs/test-rsa.crt")
+  test("config with expired cert and valid key credential fails") {
+    val tempCertFile = TempFile.fromResourcePath("/ssl/certs/svc-test-client-expired.cert.pem")
     // deleteOnExit is handled by TempFile
 
-    val tempKeyFile = TempFile.fromResourcePath("/ssl/keys/test-pkcs8.key")
+    val tempKeyFile = TempFile.fromResourcePath("/ssl/keys/svc-test-client-pkcs8.key.pem")
     // deleteOnExit is handled by TempFile
 
-    val keyCredentials = KeyCredentials.CertKeyAndChain(tempCertFile, tempKeyFile, tempCertFile)
+    val keyCredentials = KeyCredentials.CertAndKey(tempCertFile, tempKeyFile)
     val config = SslClientConfiguration(keyCredentials = keyCredentials)
 
     intercept[SslConfigurationException] {
-      val engine = factory(address, config)
+      factory(address, config)
     }
+  }
+
+  test("config with cert, key, and chain succeeds") {
+    val tempCertFile = TempFile.fromResourcePath("/ssl/certs/svc-test-client.cert.pem")
+    // deleteOnExit is handled by TempFile
+
+    val tempKeyFile = TempFile.fromResourcePath("/ssl/keys/svc-test-client-pkcs8.key.pem")
+    // deleteOnExit is handled by TempFile
+
+    // This file contains multiple certificates
+    val tempChainFile = TempFile.fromResourcePath("/ssl/certs/svc-test-chain.cert.pem")
+    // deleteOnExit is handled by TempFile
+
+    val keyCredentials = KeyCredentials.CertKeyAndChain(tempCertFile, tempKeyFile, tempChainFile)
+    val config = SslClientConfiguration(keyCredentials = keyCredentials)
+
+    val engine = factory(address, config)
+    val sslEngine = engine.self
+
+    assert(sslEngine != null)
   }
 
   test("config with insecure trust credentials succeeds") {
@@ -94,7 +114,7 @@ class Netty4ClientEngineFactoryTest extends FunSuite {
   }
 
   test("config with good trusted cert collection succeeds") {
-    val tempCertFile = TempFile.fromResourcePath("/ssl/certs/test-rsa.crt")
+    val tempCertFile = TempFile.fromResourcePath("/ssl/certs/svc-test-chain.cert.pem")
     // deleteOnExit is handled by TempFile
 
     val trustCredentials = TrustCredentials.CertCollection(tempCertFile)
@@ -166,10 +186,9 @@ class Netty4ClientEngineFactoryTest extends FunSuite {
     val appProtocols = ApplicationProtocols.Supported(Seq("h2"))
     val config = SslClientConfiguration(applicationProtocols = appProtocols)
 
-    intercept[UnsupportedOperationException] {
+    intercept[RuntimeException] {
       val engine = factory(address, config)
     }
   }
 
 }
-

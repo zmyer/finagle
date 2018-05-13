@@ -3,7 +3,6 @@ package com.twitter.finagle.redis.util
 import com.twitter.finagle.redis.protocol._
 import com.twitter.io.Buf
 import java.nio.charset.{Charset, StandardCharsets}
-import org.jboss.netty.buffer.{ChannelBuffer, ChannelBuffers}
 
 trait ErrorConversion {
   def getException(msg: String): Throwable
@@ -26,14 +25,22 @@ object BytesToString {
   def apply(arg: Array[Byte], charset: Charset = StandardCharsets.UTF_8) = new String(arg, charset)
 
   def fromList(args: Seq[Array[Byte]], charset: Charset = StandardCharsets.UTF_8) =
-    args.map { arg => BytesToString(arg, charset) }
+    args.map { arg =>
+      BytesToString(arg, charset)
+    }
 
   def fromTuples(args: Seq[(Array[Byte], Array[Byte])], charset: Charset = StandardCharsets.UTF_8) =
-    args map { arg => (BytesToString(arg._1), BytesToString(arg._2)) }
+    args map { arg =>
+      (BytesToString(arg._1), BytesToString(arg._2))
+    }
 
-  def fromTuplesWithDoubles(args: Seq[(Array[Byte], Double)],
-    charset: Charset = StandardCharsets.UTF_8) =
-    args map { arg => (BytesToString(arg._1, charset), arg._2) }
+  def fromTuplesWithDoubles(
+    args: Seq[(Array[Byte], Double)],
+    charset: Charset = StandardCharsets.UTF_8
+  ) =
+    args map { arg =>
+      (BytesToString(arg._1, charset), arg._2)
+    }
 }
 
 object StringToBytes {
@@ -44,12 +51,6 @@ object StringToBytes {
     }
 }
 
-object StringToChannelBuffer {
-  def apply(string: String, charset: Charset = StandardCharsets.UTF_8) = {
-    ChannelBuffers.wrappedBuffer(string.getBytes(charset))
-  }
-}
-
 object StringToBuf {
   def apply(string: String): Buf = Buf.Utf8(string)
 }
@@ -58,47 +59,30 @@ object BufToString {
   def apply(buf: Buf): String = Buf.Utf8.unapply(buf).get
 }
 
-object CBToString {
-  def apply(arg: ChannelBuffer, charset: Charset = StandardCharsets.UTF_8) = {
-    arg.toString(charset)
-  }
-  def fromList(args: Seq[ChannelBuffer], charset: Charset = StandardCharsets.UTF_8) =
-    args.map { arg => CBToString(arg, charset) }
-
-  def fromTuples(
-    args: Seq[(ChannelBuffer, ChannelBuffer)], charset: Charset = StandardCharsets.UTF_8
-  ) = args map { arg => (CBToString(arg._1), CBToString(arg._2)) }
-
-  def fromTuplesWithDoubles(
-    args: Seq[(ChannelBuffer, Double)],
-    charset: Charset = StandardCharsets.UTF_8
-  ) = args map { arg => (CBToString(arg._1, charset), arg._2) }
-}
-
 object ReplyFormat {
   def toString(items: List[Reply]): List[String] = {
     items flatMap {
-      case BulkReply(message)   => List(BufToString(message))
-      case EmptyBulkReply       => EmptyBulkReplyString
-      case IntegerReply(id)     => List(id.toString)
+      case BulkReply(message) => List(BufToString(message))
+      case EmptyBulkReply => EmptyBulkReplyString
+      case IntegerReply(id) => List(id.toString)
       case StatusReply(message) => List(message)
-      case ErrorReply(message)  => List(message)
+      case ErrorReply(message) => List(message)
       case MBulkReply(messages) => ReplyFormat.toString(messages)
-      case EmptyMBulkReply      => EmptyMBulkReplyString
-      case _                    => Nil
+      case EmptyMBulkReply => EmptyMBulkReplyString
+      case _ => Nil
     }
   }
 
   def toBuf(items: List[Reply]): List[Buf] = {
     items flatMap {
-      case BulkReply(message)   => List(message)
-      case EmptyBulkReply       => EmptyBulkReplyChannelBuffer
-      case IntegerReply(id)     => List(Buf.ByteArray.Owned(Array(id.toByte)))
+      case BulkReply(message) => List(message)
+      case EmptyBulkReply => EmptyBulkReplyChannelBuffer
+      case IntegerReply(id) => List(Buf.ByteArray.Owned(Array(id.toByte)))
       case StatusReply(message) => List(Buf.Utf8(message))
-      case ErrorReply(message)  => List(Buf.Utf8(message))
+      case ErrorReply(message) => List(Buf.Utf8(message))
       case MBulkReply(messages) => ReplyFormat.toBuf(messages)
-      case EmptyMBulkReply      => EmptyBulkReplyChannelBuffer
-      case _                    => Nil
+      case EmptyMBulkReply => EmptyBulkReplyChannelBuffer
+      case _ => Nil
     }
   }
 

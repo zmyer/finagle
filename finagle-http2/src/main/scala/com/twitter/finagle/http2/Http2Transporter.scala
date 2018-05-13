@@ -6,31 +6,27 @@ import com.twitter.finagle.http2.param._
 import com.twitter.finagle.http2.transport._
 import com.twitter.finagle.http2.transport.Http2ClientDowngrader.StreamMessage
 import com.twitter.finagle.netty4.Netty4Transporter
-import com.twitter.finagle.netty4.channel.BufferingChannelOutboundHandler
-import com.twitter.finagle.netty4.http.exp.{initClient, Netty4HttpTransporter, HttpCodecName}
+import com.twitter.finagle.netty4.http.{HttpCodecName, Netty4HttpTransporter, initClient}
+import com.twitter.finagle.netty4.transport.HasExecutor
 import com.twitter.finagle.param.{Timer => TimerParam}
-import com.twitter.finagle.transport.{Transport, TransportProxy}
+import com.twitter.finagle.transport.{LegacyContext, Transport, TransportContext, TransportProxy}
 import com.twitter.finagle.{Stack, Status}
-import com.twitter.logging.{Logger, HasLogLevel, Level}
+import com.twitter.logging.{HasLogLevel, Level, Logger}
 import com.twitter.util._
-import io.netty.channel.{
-  ChannelHandlerContext,
-  ChannelInboundHandlerAdapter,
-  ChannelOutboundHandlerAdapter,
-  ChannelPipeline,
-  ChannelPromise
-}
+import io.netty.channel.ChannelPipeline
 import io.netty.handler.codec.http._
 import io.netty.handler.codec.http.HttpClientUpgradeHandler.UpgradeEvent
 import io.netty.handler.codec.http2._
-import io.netty.handler.logging.LogLevel
 import java.net.SocketAddress
 import java.security.cert.Certificate
 import java.util.concurrent.atomic.AtomicReference
 
 private[finagle] object Http2Transporter {
 
-  def apply(params: Stack.Params)(addr: SocketAddress): Transporter[Any, Any] = {
+  // Sentinel that we check early to avoid polling a promise forever
+  private val UpgradeRejected: Future[Option[StreamTransportFactory]] = Future.None
+
+  def apply(params: Stack.Params)(addr: SocketAddress): Transporter[Any, Any, TransportContext] = {
     // current http2 client implementation doesn't support
     // netty-style backpressure
     // https://github.com/netty/netty/issues/3667#issue-69640214
@@ -54,75 +50,36 @@ private[finagle] object Http2Transporter {
     }
   }
 
-  /**
-   * Buffers until `channelActive` so we can ensure the connection preface is
-   * the first message we send.
-   */
-  class BufferingHandler
-    extends ChannelInboundHandlerAdapter
-    with BufferingChannelOutboundHandler { self =>
-
-    override def channelActive(ctx: ChannelHandlerContext): Unit = {
-      ctx.fireChannelActive()
-      // removing a BufferingChannelOutboundHandler writes and flushes too.
-      ctx.pipeline.remove(self)
-    }
-
-    def bind(ctx: ChannelHandlerContext, addr: SocketAddress, promise: ChannelPromise): Unit = {
-      ctx.bind(addr, promise)
-    }
-    def close(ctx: ChannelHandlerContext, promise: ChannelPromise): Unit = {
-      ctx.close(promise)
-    }
-    def connect(
-      ctx: ChannelHandlerContext,
-      local: SocketAddress,
-      remote: SocketAddress,
-      promise: ChannelPromise
-    ): Unit = {
-      ctx.connect(local, remote, promise)
-    }
-    def deregister(ctx: ChannelHandlerContext, promise: ChannelPromise): Unit = {
-      ctx.deregister(promise)
-    }
-    def disconnect(ctx: ChannelHandlerContext, promise: ChannelPromise): Unit = {
-      ctx.disconnect(promise)
-    }
-    def read(ctx: ChannelHandlerContext): Unit = {
-      ctx.read()
-    }
-  }
-
   // constructing an http2 cleartext transport
-  private[http2] def init(params: Stack.Params): ChannelPipeline => Unit =
-    { pipeline: ChannelPipeline =>
-      val connection = new DefaultHttp2Connection(false /*server*/)
-
-      // decompresses data frames according to the content-encoding header
-      val adapter = new DelegatingDecompressorFrameListener(
-        connection,
-        // adapts http2 to http 1.1
-        Http2ClientDowngrader
-      )
-
+  private[http2] def init(params: Stack.Params): ChannelPipeline => Unit = {
+    pipeline: ChannelPipeline =>
       val EncoderIgnoreMaxHeaderListSize(ignoreMaxHeaderListSize) =
         params[EncoderIgnoreMaxHeaderListSize]
 
       val connectionHandlerBuilder = new RichHttpToHttp2ConnectionHandlerBuilder()
-        .frameListener(adapter)
-        .frameLogger(new Http2FrameLogger(LogLevel.TRACE))
-        .connection(connection)
-        .initialSettings(Settings.fromParams(params))
+        .frameListener(Http2ClientDowngrader)
+        .frameLogger(new LoggerPerFrameTypeLogger(params[FrameLoggerNamePrefix].loggerNamePrefix))
+        .connection(new DefaultHttp2Connection(false /*server*/ ))
+        .initialSettings(Settings.fromParams(params, isServer = false))
         .encoderIgnoreMaxHeaderListSize(ignoreMaxHeaderListSize)
 
       val PriorKnowledge(priorKnowledge) = params[PriorKnowledge]
       val Transport.ClientSsl(config) = params[Transport.ClientSsl]
-      val HeaderSensitivity(sensitivityDetector) = params[HeaderSensitivity]
       val tlsEnabled = config.isDefined
+      val sensitivityDetector = params[HeaderSensitivity].sensitivityDetector
+
+      val maxChunkSize = params[http.param.MaxChunkSize].size
+      val maxHeaderSize = params[http.param.MaxHeaderSize].size
+      val maxInitialLineSize = params[http.param.MaxInitialLineSize].size
+      val sourceCodec = new HttpClientCodec(
+        maxInitialLineSize.inBytes.toInt,
+        maxHeaderSize.inBytes.toInt,
+        maxChunkSize.inBytes.toInt
+      )
 
       if (tlsEnabled) {
         val p = Promise[Unit]()
-        val buffer = new ChannelOutboundHandlerAdapter with BufferingChannelOutboundHandler
+        val buffer = BufferingHandler.alpn()
         val connectionHandler = connectionHandlerBuilder
           .onActive { () =>
             // need to stop buffering after we've sent the connection preface
@@ -135,35 +92,25 @@ private[finagle] object Http2Transporter {
           })
           .build()
         pipeline.addLast("alpn", new ClientNpnOrAlpnHandler(connectionHandler, params))
-        pipeline.addLast("buffer", buffer)
+        pipeline.addLast(BufferingHandler.HandlerName, buffer)
       } else if (priorKnowledge) {
         val connectionHandler = connectionHandlerBuilder.build()
         pipeline.addLast(HttpCodecName, connectionHandler)
-        pipeline.addLast("buffer", new BufferingHandler())
-        pipeline.addLast("aggregate", new AdapterProxyChannelHandler({ pipeline =>
-          pipeline.addLast("schemifier", new SchemifyingHandler("http"))
-          initClient(params)(pipeline)
-        }))
-      } else {
-        val connectionHandler = connectionHandlerBuilder.build()
-        val maxChunkSize = params[http.param.MaxChunkSize].size
-        val maxHeaderSize = params[http.param.MaxHeaderSize].size
-        val maxInitialLineSize = params[http.param.MaxInitialLineSize].size
-
-        val sourceCodec = new HttpClientCodec(
-          maxInitialLineSize.inBytes.toInt,
-          maxHeaderSize.inBytes.toInt,
-          maxChunkSize.inBytes.toInt
+        pipeline.addLast(BufferingHandler.HandlerName, BufferingHandler.priorKnowledge())
+        pipeline.addLast(
+          AdapterProxyChannelHandler.HandlerName,
+          new AdapterProxyChannelHandler({ pipeline =>
+            pipeline.addLast(SchemifyingHandler.HandlerName, new SchemifyingHandler("http"))
+            pipeline.addLast(StripHeadersHandler.HandlerName, StripHeadersHandler)
+            initClient(params)(pipeline)
+          })
         )
-
-        val upgradeCodec = new Http2ClientUpgradeCodec(connectionHandler)
-        val upgradeHandler = new HttpClientUpgradeHandler(sourceCodec, upgradeCodec, Int.MaxValue)
+      } else {
         pipeline.addLast(HttpCodecName, sourceCodec)
-        pipeline.addLast("httpUpgradeHandler", upgradeHandler)
-        pipeline.addLast(UpgradeRequestHandler.HandlerName, new UpgradeRequestHandler(params))
+        pipeline.addLast(UpgradeRequestHandler.HandlerName, new UpgradeRequestHandler(params, sourceCodec, connectionHandlerBuilder))
         initClient(params)(pipeline)
       }
-    }
+  }
 
   def unsafeCast(t: Transport[HttpObject, HttpObject]): Transport[Any, Any] =
     t.map(_.asInstanceOf[HttpObject], _.asInstanceOf[Any])
@@ -189,14 +136,16 @@ private[finagle] object Http2Transporter {
  * doesn't attempt to upgrade.
  */
 private[finagle] class Http2Transporter(
-    underlying: Transporter[Any, Any],
-    underlyingHttp11: Transporter[Any, Any],
-    alpnUpgrade: Boolean,
-    params: Stack.Params,
-    implicit val timer: Timer)
-  extends Transporter[Any, Any] with Closable { self =>
+  underlying: Transporter[Any, Any, TransportContext],
+  underlyingHttp11: Transporter[Any, Any, TransportContext],
+  alpnUpgrade: Boolean,
+  params: Stack.Params,
+  implicit val timer: Timer
+) extends Transporter[Any, Any, TransportContext]
+    with Closable { self =>
 
   private[this] def deadTransport(exn: Throwable) = new Transport[Any, Any] {
+    type Context = TransportContext
     def read(): Future[Any] = Future.never
     def write(msg: Any): Future[Unit] = Future.never
     val status: Status = Status.Closed
@@ -205,6 +154,7 @@ private[finagle] class Http2Transporter(
     def localAddress: SocketAddress = new SocketAddress {}
     def peerCertificate: Option[Certificate] = None
     def close(deadline: Time): Future[Unit] = Future.Done
+    val context: TransportContext = new LegacyContext(this)
   }
 
   def remoteAddress: SocketAddress = underlying.remoteAddress
@@ -213,19 +163,35 @@ private[finagle] class Http2Transporter(
 
   import Http2Transporter._
 
-  protected[this] val cachedConnection = new AtomicReference[Future[Option[MultiplexedTransporter]]]()
+  protected[this] val cachedConnection =
+    new AtomicReference[Future[Option[StreamTransportFactory]]]()
 
-  private[this] def tryEvict(f: Future[Option[MultiplexedTransporter]]): Unit = {
+  // We want HTTP/1.x connections to get culled once we have a live HTTP/2 session so
+  // we transition their status to `Closed` once we have an H2 session that can be used.
+  private[this] val http1Status: () => Status = () => {
+    val f = cachedConnection.get
+    if (f == null || (f eq UpgradeRejected)) Status.Open
+    else f.poll match {
+      case Some(Return(Some(fac))) =>
+        fac.status match {
+          case Status.Open => Status.Closed
+          case status => status
+        }
+      case _ => Status.Open
+    }
+  }
+
+  private[this] def tryEvict(f: Future[Option[StreamTransportFactory]]): Unit = {
     // kick us out of the cache so we can try to reestablish the connection
     cachedConnection.compareAndSet(f, null)
   }
 
   private[this] def useExistingConnection(
-    f: Future[Option[MultiplexedTransporter]]
+    f: Future[Option[StreamTransportFactory]]
   ): Future[Transport[Any, Any]] = f.transform {
     case Return(Some(fn)) =>
-      Future.value(fn() match {
-        case Return(transport) => unsafeCast(transport)
+      fn().transform {
+        case Return(transport) => Future.value(unsafeCast(transport))
         case Throw(exn) =>
           log.warning(
             exn,
@@ -234,8 +200,8 @@ private[finagle] class Http2Transporter(
           tryEvict(f)
 
           // we expect finagle to treat this specially and retry if possible
-          deadTransport(exn)
-      })
+          Future.value(deadTransport(exn))
+      }
     case Return(None) =>
       // we didn't upgrade
       underlyingHttp11()
@@ -250,60 +216,85 @@ private[finagle] class Http2Transporter(
   private[this] def fallbackToHttp11(f: Future[Option[_]]): Future[Transport[Any, Any]] = {
     val conn = underlyingHttp11()
     conn.map { http11Trans =>
-      val ref = new RefTransport(http11Trans)
-      f.respond {
-        case Return(None) => // the upgrade was rejected, so we can keep the connection
-        case _ =>
-          // we allow the pool to close us if we pass the upgrade or fail entirely
-          // this will trigger a new connection attempt, which will use the upgraded
-          // connection if we passed, or try to upgrade again if there was a non-rejection
-          // failure in the upgrade
-          ref.update { trans =>
-            new TransportProxy[Any, Any](trans) {
-              def write(any: Any): Future[Unit] = trans.write(any)
-              def read(): Future[Any] = trans.read()
-              override def status: Status = Status.Closed
-            }
-          }
+      new TransportProxy[Any, Any](http11Trans) {
+        def write(req: Any): Future[Unit] = http11Trans.write(req)
+        def read(): Future[Any] = http11Trans.read()
+
+        override def status: Status =
+          Status.worst(http11Trans.status, http1Status())
       }
-      ref
     }
   }
 
   private[this] def upgrade(): Future[Transport[Any, Any]] = {
     val conn: Future[Transport[Any, Any]] = underlying()
-    val p = Promise[Option[MultiplexedTransporter]]()
+    val p = Promise[Option[StreamTransportFactory]]()
     if (cachedConnection.compareAndSet(null, p)) {
-      p.onFailure { case NonFatal(exn) =>
-        val level = exn match {
-          case HasLogLevel(level) => level
-          case _ => Level.WARNING
-        }
-        log.log(level, exn, s"An upgrade attempt to $remoteAddress failed.")
-        tryEvict(p)
+      p.respond {
+        case Return(None) =>
+          // we attempt to set the sentinel value to make polling status cheaper in the future.
+          cachedConnection.compareAndSet(p, UpgradeRejected)
+
+        case Return(_) => // nop: successful upgrade. Good news.
+
+        case Throw(exn) =>
+          val level = exn match {
+            case HasLogLevel(level) => level
+            case _ => Level.WARNING
+          }
+          log.log(level, exn, s"An upgrade attempt to $remoteAddress failed.")
+          tryEvict(p)
       }
       conn.transform {
         case Return(trans) =>
           trans.onClose.ensure {
-            tryEvict(p)
+            if (p.isDefined) {
+              // we should only evict if we haven't successfully downgraded
+              // before.  if we successfully downgraded, it's unlikely that
+              // attempting the upgrade again will be fruitful.
+              p.respond {
+                case Return(None) => // nop
+                case _ => tryEvict(p)
+              }
+            } else {
+              tryEvict(p)
+            }
           }
 
           if (alpnUpgrade) {
-            trans.read().onSuccess {
-              case UpgradeEvent.UPGRADE_REJECTED =>
+            trans.read().transform {
+              case Return(UpgradeEvent.UPGRADE_REJECTED) =>
                 p.setValue(None)
-              case UpgradeEvent.UPGRADE_SUCCESSFUL =>
-                val casted = Transport.cast[StreamMessage, StreamMessage](trans)
-                p.setValue(Some(new MultiplexedTransporter(casted, trans.remoteAddress, params)))
-              case msg =>
+                // we continue using the same transport, since by now it has
+                // been transformed into an http/1.1 connection.
+                Future.value(trans)
+              case Return(UpgradeEvent.UPGRADE_SUCCESSFUL) =>
+                val inOutCasted = Transport.cast[StreamMessage, StreamMessage](trans)
+                val contextCasted =
+                  inOutCasted.asInstanceOf[
+                    Transport[StreamMessage, StreamMessage] {
+                      type Context = TransportContext with HasExecutor
+                    }
+                  ]
+                p.setValue(Some(
+                  new StreamTransportFactory(contextCasted, trans.remoteAddress, params)))
+                useExistingConnection(p)
+              case Return(msg) =>
                 log.error(s"Non-upgrade event detected $msg")
+                trans.close()
+                p.setValue(None)
+                useExistingConnection(p)
+              case Throw(exn) =>
+                log.error(exn, "Failed to clearly negotiate either HTTP/2 or HTTP/1.1.  " +
+                  "Falling back to HTTP/1.1.")
+                trans.close()
+                p.setValue(None)
+                useExistingConnection(p)
             }
-
-            useExistingConnection(p)
           } else {
             val ref = new RefTransport(trans)
             ref.update { t =>
-              new Http2UpgradingTransport(t, ref, p, params)
+              new Http2UpgradingTransport(t, ref, p, params, http1Status)
             }
             Future.value(ref)
           }
@@ -343,9 +334,10 @@ private[finagle] class Http2Transporter(
 
     // Status.Open is a good default since this is just here to do liveness checks with Ping.
     // We assume all other failure detection is handled up the chain.
-    if (f == null) Status.Open else {
+    if (f == null) Status.Open
+    else {
       f.poll match {
-        case Some(Return(Some(multi))) => multi.status
+        case Some(Return(Some(fac))) => fac.status
         case _ => Status.Open
       }
     }

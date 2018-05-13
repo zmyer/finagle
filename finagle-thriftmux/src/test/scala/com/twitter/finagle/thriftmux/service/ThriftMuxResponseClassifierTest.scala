@@ -9,11 +9,8 @@ import com.twitter.finagle.thriftmux.thriftscala.{InvalidQueryException, TestSer
 import com.twitter.io.Buf
 import com.twitter.util.{Throw, Return}
 import java.nio.charset.StandardCharsets.UTF_8
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class ThriftMuxResponseClassifierTest extends FunSuite {
 
   private val classifier = ThriftMuxResponseClassifier.usingDeserializeCtx {
@@ -32,7 +29,7 @@ class ThriftMuxResponseClassifierTest extends FunSuite {
     def testApply(in: String, expectedClass: ResponseClass): Unit = {
       val ctx = new DeserializeCtx(TestService.Query.Args(in), deserializer)
       Contexts.local.let(DeserializeCtx.Key, ctx) {
-        val rep = mux.Response(Buf.Utf8(in))
+        val rep = mux.Response(Nil, Buf.Utf8(in))
         assert(expectedClass == classifier(ReqRep(in, Return(rep))))
       }
     }
@@ -43,10 +40,12 @@ class ThriftMuxResponseClassifierTest extends FunSuite {
     def testApplyOrElse(in: String, expectedClass: ResponseClass): Unit = {
       val ctx = new DeserializeCtx(TestService.Query.Args(in), deserializer)
       Contexts.local.let(DeserializeCtx.Key, ctx) {
-        val rep = mux.Response(Buf.Utf8(in))
+        val rep = mux.Response(Nil, Buf.Utf8(in))
         assert(!classifier.isDefinedAt(ReqRep(in, Return(rep))))
-        assert(expectedClass ==
-          classifier.applyOrElse(ReqRep(in, Return(rep)), ResponseClassifier.Default))
+        assert(
+          expectedClass ==
+            classifier.applyOrElse(ReqRep(in, Return(rep)), ResponseClassifier.Default)
+        )
       }
     }
     testApplyOrElse("yep", Success)
@@ -62,19 +61,23 @@ class ThriftMuxResponseClassifierTest extends FunSuite {
     val input = "throw"
     val ctx = new DeserializeCtx(TestService.Query.Args(input), throwingDeser)
     Contexts.local.let(DeserializeCtx.Key, ctx) {
-      val rep = mux.Response(Buf.Utf8(input))
+      val rep = mux.Response(Nil, Buf.Utf8(input))
 
       assert(!classifier.isDefinedAt(ReqRep(input, Return(rep))))
-      assert(Success ==
-        classifier.applyOrElse(ReqRep(input, Return(rep)), ResponseClassifier.Default))
+      assert(
+        Success ==
+          classifier.applyOrElse(ReqRep(input, Return(rep)), ResponseClassifier.Default)
+      )
     }
   }
 
   test("usingDeserializeCtx handles no DeserializationCtx") {
     def testApply(in: String, expectedClass: ResponseClass): Unit = {
-      val rep = mux.Response(Buf.Utf8(in))
-      assert(expectedClass ==
-        classifier.applyOrElse(ReqRep(in, Return(rep)), ResponseClassifier.Default))
+      val rep = mux.Response(Nil, Buf.Utf8(in))
+      assert(
+        expectedClass ==
+          classifier.applyOrElse(ReqRep(in, Return(rep)), ResponseClassifier.Default)
+      )
     }
     testApply("nope", Success)
     testApply("lol", Success)
@@ -90,7 +93,7 @@ class ThriftMuxResponseClassifierTest extends FunSuite {
     def testApply(in: String, expectedClass: ResponseClass): Unit = {
       val ctx = new DeserializeCtx(TestService.Query.Args(in), deserializer)
       Contexts.local.let(DeserializeCtx.Key, ctx) {
-        val rep = mux.Response(Buf.Utf8(in))
+        val rep = mux.Response(Nil, Buf.Utf8(in))
         assert(expectedClass == classifier(ReqRep(in, Return(rep))))
       }
     }
@@ -98,12 +101,12 @@ class ThriftMuxResponseClassifierTest extends FunSuite {
     def testApplyOrElse(in: String, expectedClass: ResponseClass): Unit = {
       val ctx = new DeserializeCtx(TestService.Query.Args(in), deserializer)
       Contexts.local.let(DeserializeCtx.Key, ctx) {
-        val rep = mux.Response(Buf.Utf8(in))
+        val rep = mux.Response(Nil, Buf.Utf8(in))
         assert(!classifier.isDefinedAt(ReqRep(in, Return(rep))))
-        assert(expectedClass ==
-          classifier.applyOrElse(
-            ReqRep(in, Return(rep)),
-            ResponseClassifier.Default))
+        assert(
+          expectedClass ==
+            classifier.applyOrElse(ReqRep(in, Return(rep)), ResponseClassifier.Default)
+        )
       }
     }
 
@@ -116,7 +119,7 @@ class ThriftMuxResponseClassifierTest extends FunSuite {
     val ctx = new DeserializeCtx(TestService.Query.Args(in), deserializer)
     Contexts.local.let(DeserializeCtx.Key, ctx) {
       assert(deserializer(in.getBytes(UTF_8)).isThrow)
-      val rep = mux.Response(Buf.Utf8(in))
+      val rep = mux.Response(Nil, Buf.Utf8(in))
       val reqRep = ReqRep(in, Return(rep))
       assert(ThriftMuxResponseClassifier.DeserializeCtxOnly.isDefinedAt(reqRep))
       assert(Success == ThriftMuxResponseClassifier.DeserializeCtxOnly(reqRep))

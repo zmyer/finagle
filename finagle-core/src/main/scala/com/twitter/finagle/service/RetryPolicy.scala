@@ -1,8 +1,21 @@
 package com.twitter.finagle.service
 
 import com.twitter.conversions.time._
-import com.twitter.finagle.{ChannelClosedException, Failure, FailureFlags, TimeoutException, WriteException}
-import com.twitter.util.{Duration, JavaSingleton, Return, Throw, Try, TimeoutException => UtilTimeoutException}
+import com.twitter.finagle.{
+  ChannelClosedException,
+  Failure,
+  FailureFlags,
+  TimeoutException,
+  WriteException
+}
+import com.twitter.util.{
+  Duration,
+  JavaSingleton,
+  Return,
+  Throw,
+  Try,
+  TimeoutException => UtilTimeoutException
+}
 import java.util.{concurrent => juc}
 import java.{util => ju}
 import scala.collection.JavaConverters._
@@ -15,9 +28,14 @@ import scala.collection.JavaConverters._
  * a [[Duration]] field for how long to wait for the next retry as well
  * as the next `RetryPolicy` to use.
  *
+ * Finagle will handle retryable Throws automatically but you will need to
+ * supply a custom [[ResponseClassifier]] to inform Finagle which application
+ * level exceptions are retryable.
+ *
  * @see [[SimpleRetryPolicy]] for a Java friendly API.
  */
 abstract class RetryPolicy[-A] extends (A => Option[(Duration, RetryPolicy[A])]) {
+
   /**
    * Creates a new `RetryPolicy` based on the current `RetryPolicy` in which values of `A`
    * are first checked against a predicate function, and only if the predicate returns true
@@ -91,9 +109,9 @@ abstract class RetryPolicy[-A] extends (A => Option[(Duration, RetryPolicy[A])])
  * A retry policy abstract class. This is convenient to use for Java programmers. Simply implement
  * the two abstract methods `shouldRetry` and `backoffAt` and you're good to go!
  */
-abstract class SimpleRetryPolicy[A](i: Int) extends RetryPolicy[A]
-  with (A => Option[(Duration, RetryPolicy[A])])
-{
+abstract class SimpleRetryPolicy[A](i: Int)
+    extends RetryPolicy[A]
+    with (A => Option[(Duration, RetryPolicy[A])]) {
   def this() = this(0)
 
   final def apply(e: A) = {
@@ -166,6 +184,9 @@ object RetryPolicy extends JavaSingleton {
     case Throw(RetryableWriteException(_)) => true
   }
 
+  /**
+   * Use [[ResponseClassifier.RetryOnTimeout]] for the [[ResponseClassifier]] equivalent.
+   */
   val TimeoutAndWriteExceptionsOnly: PartialFunction[Try[Nothing], Boolean] =
     WriteExceptionsOnly.orElse {
       case Throw(Failure(Some(_: TimeoutException))) => true
@@ -174,6 +195,9 @@ object RetryPolicy extends JavaSingleton {
       case Throw(_: UtilTimeoutException) => true
     }
 
+  /**
+   * Use [[ResponseClassifier.RetryOnChannelClosed]] for the [[ResponseClassifier]] equivalent.
+   */
   val ChannelClosedExceptionsOnly: PartialFunction[Try[Nothing], Boolean] = {
     case Throw(_: ChannelClosedException) => true
   }
@@ -202,14 +226,16 @@ object RetryPolicy extends JavaSingleton {
     policy: RetryPolicy[Try[Nothing]]
   ): RetryPolicy[(Req, Try[Rep])] =
     new RetryPolicy[(Req, Try[Rep])] {
-      def apply(input: (Req, Try[Rep])): Option[(Duration, RetryPolicy[(Req, Try[Rep])])] = input match {
-        case (_, t@Throw(_)) =>
-          policy(t.cast[Nothing]) match {
-            case Some((howlong, nextPolicy)) => Some((howlong, convertExceptionPolicy(nextPolicy)))
-            case None => None
-          }
-        case (_, Return(_)) => None
-      }
+      def apply(input: (Req, Try[Rep])): Option[(Duration, RetryPolicy[(Req, Try[Rep])])] =
+        input match {
+          case (_, t @ Throw(_)) =>
+            policy(t.cast[Nothing]) match {
+              case Some((howlong, nextPolicy)) =>
+                Some((howlong, convertExceptionPolicy(nextPolicy)))
+              case None => None
+            }
+          case (_, Return(_)) => None
+        }
     }
 
   /**

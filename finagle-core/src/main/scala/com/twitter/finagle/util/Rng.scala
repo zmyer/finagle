@@ -8,13 +8,14 @@ import java.util.concurrent.ThreadLocalRandom
  * to java.util.Random. We bridge this gap.
  */
 trait Rng {
+
   /**
-   * Generate a random Double between `0.0` and `1.0`, inclusive.
+   * Generate a random Double between 0.0 and 1.0, inclusive.
    */
   def nextDouble(): Double
 
   /**
-   * Generate a random Int betwen 0 (inclusive) and `n` (exclusive).
+   * Generate a random Int between 0 (inclusive) and `n` (exclusive).
    *
    * @param n the upper bound (exclusive). Must be a positive value.
    */
@@ -58,8 +59,8 @@ object Rng {
       var v = 0L
       do {
         bits = (r.nextLong() << 1) >>> 1
-        v = bits%n
-      } while (bits-v+(n-1) < 0L)
+        v = bits % n
+      } while (bits - v + (n - 1) < 0L)
       v
     }
   }
@@ -75,4 +76,3 @@ object Rng {
 object Rngs {
   val threadLocal: Rng = Rng.threadLocal
 }
-

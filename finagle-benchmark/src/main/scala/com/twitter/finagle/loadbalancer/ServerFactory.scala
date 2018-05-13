@@ -1,12 +1,15 @@
 package com.twitter.finagle.loadbalancer
 
-import com.twitter.finagle.{ClientConnection, Service, ServiceFactory}
+import com.twitter.finagle.{Address, ClientConnection, Service}
 import com.twitter.finagle.stats.StatsReceiver
 import com.twitter.finagle.util.DefaultTimer
 import com.twitter.util.{Duration, Future, Time}
 import java.util.concurrent.atomic.AtomicInteger
 
-private trait Server extends ServiceFactory[Unit, Unit] {
+private trait Server extends EndpointFactory[Unit, Unit] {
+  val address = Address.Failed(new Exception)
+  def remake() = {}
+
   /**
    * The maximum amount of concurrent load observed.
    */
@@ -23,6 +26,7 @@ private trait Server extends ServiceFactory[Unit, Unit] {
  * it creates.
  */
 private object ServerFactory {
+
   /**
    * Creates a [[Server]] with the given `id` and applies `nextLatency`
    * latency for each request.
@@ -50,7 +54,7 @@ private object ServerFactory {
         }
         numRequests.incr()
         _numRequests.incrementAndGet()
-        Future.sleep(nextLatency())(DefaultTimer.twitter).ensure {
+        Future.sleep(nextLatency())(DefaultTimer).ensure {
           _load.decrementAndGet()
         }
       }

@@ -1,6 +1,7 @@
 package com.twitter.finagle.param
 
 import com.twitter.finagle.service.StatsFilter
+import com.twitter.finagle.util.DefaultTimer
 import com.twitter.finagle.{Stack, stats, tracing, util}
 import com.twitter.util.{JavaTimer, NullMonitor}
 
@@ -47,7 +48,7 @@ case class Timer(timer: com.twitter.util.Timer) {
     (this, Timer.param)
 }
 object Timer {
-  implicit val param: Stack.Param[Timer] = Stack.Param(Timer(util.DefaultTimer.twitter))
+  implicit val param: Stack.Param[Timer] = Stack.Param(Timer(DefaultTimer))
 }
 
 /**
@@ -68,6 +69,7 @@ case class HighResTimer(timer: com.twitter.util.Timer) {
 }
 
 object HighResTimer {
+
   /**
    * The default Timer used for configuration.
    *
@@ -78,7 +80,8 @@ object HighResTimer {
       override def stop(): Unit = ()
     }
 
-  implicit val param: Stack.Param[HighResTimer] = Stack.Param(HighResTimer(Default))
+  implicit val param: Stack.Param[HighResTimer] =
+    Stack.Param(HighResTimer(Default))
 }
 
 /**
@@ -142,14 +145,13 @@ object Monitor {
  * [[com.twitter.finagle.service.ResponseClassifier.Default]]
  * which is a total function fully covering the input domain.
  */
-case class ResponseClassifier(
-    responseClassifier: com.twitter.finagle.service.ResponseClassifier) {
+case class ResponseClassifier(responseClassifier: com.twitter.finagle.service.ResponseClassifier) {
   def mk(): (ResponseClassifier, Stack.Param[ResponseClassifier]) =
     (this, ResponseClassifier.param)
 }
 object ResponseClassifier {
-  implicit val param: Stack.Param[ResponseClassifier] = Stack.Param(ResponseClassifier(
-    com.twitter.finagle.service.ResponseClassifier.Default))
+  implicit val param: Stack.Param[ResponseClassifier] =
+    Stack.Param(ResponseClassifier(com.twitter.finagle.service.ResponseClassifier.Default))
 }
 
 /**

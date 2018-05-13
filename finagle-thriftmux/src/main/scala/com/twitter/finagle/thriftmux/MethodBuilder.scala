@@ -1,15 +1,14 @@
 package com.twitter.finagle.thriftmux
 
-import com.twitter.finagle.thrift.{ServiceIfaceBuilder, ThriftClientRequest, ThriftServiceIface}
 import com.twitter.finagle._
 import com.twitter.finagle.builder.{ClientBuilder, ClientConfig}
 import com.twitter.finagle.client.RefcountedClosable
 import com.twitter.finagle.service.ResponseClassifier
+import com.twitter.finagle.thrift.service.{Filterable, ServicePerEndpointBuilder}
+import com.twitter.finagle.thrift.{ServiceIfaceBuilder, ThriftClientRequest, ThriftRichClient}
 import com.twitter.util.Duration
+import com.twitter.util.tunable.Tunable
 
-/**
- * '''Experimental:''' This API is under construction.
- */
 object MethodBuilder {
   import client.MethodBuilder._
 
@@ -21,13 +20,13 @@ object MethodBuilder {
    * The value for "your_client_label" is taken from the `withLabel` setting
    * (from [[param.Label]]). If that is not set, `dest` is used.
    * The value for "method_name" is set when an method-specific client
-   * is constructed, as in [[MethodBuilder.newServiceIface]].
+   * is constructed, as in [[MethodBuilder.servicePerEndpoint]].
    *
    * @param dest where requests are dispatched to.
    *             See the [[https://twitter.github.io/finagle/guide/Names.html user guide]]
    *             for details on destination names.
    *
-   * @see [[ThriftMux.Client.methodBuilder(String)]]
+   * @see [[com.twitter.finagle.ThriftMux.Client.methodBuilder(String)]]
    */
   def from(
     dest: String,
@@ -43,13 +42,13 @@ object MethodBuilder {
    * The value for "your_client_label" is taken from the `withLabel` setting
    * (from [[param.Label]]). If that is not set, `dest` is used.
    * The value for "method_name" is set when an method-specific client
-   * is constructed, as in [[MethodBuilder.newServiceIface]].
+   * is constructed, as in [[MethodBuilder.servicePerEndpoint]].
    *
    * @param dest where requests are dispatched to.
    *             See the [[https://twitter.github.io/finagle/guide/Names.html user guide]]
    *             for details on destination names.
    *
-   * @see [[ThriftMux.Client.methodBuilder(Name)]]
+   * @see [[com.twitter.finagle.ThriftMux.Client.methodBuilder(Name)]]
    */
   def from(
     dest: Name,
@@ -65,12 +64,13 @@ object MethodBuilder {
       dest,
       stack,
       params,
-      Config.create(thriftMuxClient.stack, params))
-    new MethodBuilder(thriftMuxClient, mb)
+      Config.create(thriftMuxClient.stack, params)
+    )
+    new MethodBuilder(thriftMuxClient.asInstanceOf[ThriftRichClient], mb)
   }
 
   /**
-   * '''NOTE:''' Prefer using [[ThriftMux.Client.methodBuilder]] over using
+   * '''NOTE:''' Prefer using [[com.twitter.finagle.ThriftMux.Client.methodBuilder]] over using
    * this approach to construction. The functionality is available through
    * [[ThriftMux.Client]] and [[MethodBuilder]] while addressing the various issues
    * of `ClientBuilder`.
@@ -82,7 +82,7 @@ object MethodBuilder {
    * The value for "clientbuilders_name" is taken from the [[ClientBuilder.name]]
    * configuration, using "client" if unspecified.
    * The value for "method_name" is set when an method-specific client
-   * is constructed, as in [[MethodBuilder.newServiceIface]].
+   * is constructed, as in [[MethodBuilder.servicePerEndpoint]].
    *
    *  - The [[ClientBuilder.timeout]] configuration will be used as the default
    *  value for [[MethodBuilder.withTimeoutTotal]].
@@ -114,9 +114,28 @@ object MethodBuilder {
 }
 
 /**
- * '''Experimental:''' This API is under construction.
-
- * @example Given an example IDL:
+ * `MethodBuilder` is a collection of APIs for client configuration at
+ * a higher level than the Finagle 6 APIs while improving upon the deprecated
+ * [[ClientBuilder]]. `MethodBuilder` provides:
+ *
+ *  - Logical success rate metrics.
+ *  - Retries based on application-level requests and responses (e.g. a code in
+ *    the Thrift response).
+ *  - Configuration of per-attempt and total timeouts.
+ *
+ * All of these can be customized per method (or endpoint) while sharing a single
+ * underlying Finagle client. Concretely, a single service might offer both
+ * `getOneTweet` as well as `deleteTweets`, whilst each having
+ * wildly different characteristics. The get is idempotent and has a tight latency
+ * distribution while the delete is not idempotent and has a wide latency
+ * distribution. If users want different configurations, without `MethodBuilder`
+ * they must create separate Finagle clients for each grouping. While long-lived
+ * clients in Finagle are not expensive, they are not free. They create
+ * duplicate metrics and waste heap, file descriptors, and CPU.
+ *
+ * = Example =
+ *
+ * Given an example IDL:
  * {{{
  * exception AnException {
  *   1: i32 errorCode
@@ -152,20 +171,100 @@ object MethodBuilder {
  *     .theMethod
  * }}}
  *
+ * = Timeouts =
+ *
+ * Defaults to using the StackClient's configuration.
+ *
+ * An example of setting a per-request timeout of 50 milliseconds and a total
+ * timeout of 100 milliseconds:
+ * {{{
+ * import com.twitter.conversions.time._
+ * import com.twitter.finagle.thriftmux.MethodBuilder
+ *
+ * val builder: MethodBuilder = ???
+ * builder
+ *   .withTimeoutPerRequest(50.milliseconds)
+ *   .withTimeoutTotal(100.milliseconds)
+ * }}}
+ *
+ * = Retries =
+ *
+ * Retries are intended to help clients improve success rate by trying
+ * failed requests additional times. Care must be taken by developers
+ * to only retry when it is known to be safe to issue the request multiple
+ * times. This is because the client cannot always be sure what the
+ * backend service has done. An example of a request that is safe to
+ * retry would be a read-only request.
+ *
+ * Defaults to using the client's [[ResponseClassifier]] to retry failures
+ * [[com.twitter.finagle.service.ResponseClass.RetryableFailure marked as retryable]].
+ * See [[withRetryForClassifier]] for details.
+ *
+ * An example of configuring classifiers for ChannelClosed and Timeout exceptions:
+ * {{{
+ * import com.twitter.finagle.service.ResponseClassifier._
+ * import com.twitter.finagle.thriftmux.MethodBuilder
+ *
+ * val builder: MethodBuilder = ???
+ * builder
+ *   .withRetryForClassifier(RetryOnChannelClosed.orElse(RetryOnTimeout))
+ * }}}
+ *
+ * A [[com.twitter.finagle.service.RetryBudget]] is used to prevent retries from overwhelming
+ * the backend service. The budget is shared across clients created from
+ * an initial `MethodBuilder`. As such, even if the retry rules
+ * deem the request retryable, it may not be retried if there is insufficient
+ * budget.
+ *
+ * Finagle will automatically retry failures that are known to be safe
+ * to retry via [[com.twitter.finagle.service.RequeueFilter]]. This includes
+ * [[com.twitter.finagle.WriteException WriteExceptions]] and
+ * [[com.twitter.finagle.Failure.Restartable retryable nacks]]. As these should have
+ * already been retried, we avoid retrying them again by ignoring them at this layer.
+ *
+ * Additional information regarding retries can be found in the
+ * [[https://twitter.github.io/finagle/guide/Clients.html#retries user guide]].
+ *
+ * The classifier is also used to determine the logical success metrics of
+ * the method. Logical here means after any retries are run. For example
+ * should a request result in retryable failure on the first attempt, but
+ * succeed upon retry, this is exposed through metrics as a success.
+ * Logical success rate metrics are scoped to
+ * "clnt/your_client_label/method_name/logical" and get "success" and
+ * "requests" counters along with a "request_latency_ms" stat.
+ *
+ * Unsuccessful requests are logged at `com.twitter.logging.Level.DEBUG` level.
+ * Further details, including the request and response, are available at
+ * `TRACE` level.
+ *
  * @see [[com.twitter.finagle.ThriftMux.Client.methodBuilder]] to construct instances.
  *
- * @see [[https://twitter.github.io/finagle/guide/MethodBuilder.html user guide]]
- *      and [[client.MethodBuilderScaladoc]] for documentation.
+ * @see The [[https://twitter.github.io/finagle/guide/MethodBuilder.html user guide]].
  */
 class MethodBuilder(
-    rich: ThriftRichClient,
-    mb: client.MethodBuilder[ThriftClientRequest, Array[Byte]])
-  extends client.MethodBuilderScaladoc[MethodBuilder] {
+  rich: ThriftRichClient,
+  mb: client.MethodBuilder[ThriftClientRequest, Array[Byte]]
+) extends client.MethodBuilderScaladoc[MethodBuilder] {
+
+  /**
+   * Configured client label. The `label` is used to assign a label to the underlying Thrift client.
+   * The label is used to display stats, etc.
+   *
+   * @see [[com.twitter.finagle.Client]]
+   * @see [[https://twitter.github.io/finagle/guide/Clients.html#clients]]
+   */
+  def label: String = mb.params[param.Label].label
 
   def withTimeoutTotal(howLong: Duration): MethodBuilder =
     new MethodBuilder(rich, mb.withTimeout.total(howLong))
 
+  def withTimeoutTotal(howLong: Tunable[Duration]): MethodBuilder =
+    new MethodBuilder(rich, mb.withTimeout.total(howLong))
+
   def withTimeoutPerRequest(howLong: Duration): MethodBuilder =
+    new MethodBuilder(rich, mb.withTimeout.perRequest(howLong))
+
+  def withTimeoutPerRequest(howLong: Tunable[Duration]): MethodBuilder =
     new MethodBuilder(rich, mb.withTimeout.perRequest(howLong))
 
   def withRetryForClassifier(classifier: ResponseClassifier): MethodBuilder =
@@ -175,20 +274,79 @@ class MethodBuilder(
     new MethodBuilder(rich, mb.withRetry.disabled)
 
   /**
+   * @inheritdoc
+   *
+   * This additionally causes Thrift Exceptions to be retried.
+   */
+  def idempotent(maxExtraLoad: Double): MethodBuilder =
+    new MethodBuilder(rich, mb.idempotent(
+      maxExtraLoad,
+      sendInterrupts = true,
+      ResponseClassifier.RetryOnThrows))
+
+  /**
+   * @inheritdoc
+   *
+   * This additionally causes Thrift Exceptions to be retried.
+   */
+  def idempotent(maxExtraLoad: Tunable[Double]): MethodBuilder =
+    new MethodBuilder(rich, mb.idempotent(
+      maxExtraLoad,
+      sendInterrupts = true,
+      ResponseClassifier.RetryOnThrows))
+
+  def nonIdempotent: MethodBuilder =
+    new MethodBuilder(rich, mb.nonIdempotent)
+
+  /**
    * Construct a `ServiceIface` to be used for the `methodName` function.
    *
    * @param methodName used for scoping metrics (e.g. "clnt/your_client_label/method_name").
    */
-  def newServiceIface[ServiceIface <: ThriftServiceIface.Filterable[ServiceIface]](
+  @deprecated("Use servicePerEndpoint", "2017-11-29")
+  def newServiceIface[ServiceIface <: Filterable[ServiceIface]](
     methodName: String
   )(
     implicit builder: ServiceIfaceBuilder[ServiceIface]
   ): ServiceIface = {
-    val filters: Filter.TypeAgnostic = mb.filters(methodName)
+    val filters: Filter.TypeAgnostic = mb.filters(Some(methodName))
     val serviceIface: ServiceIface = rich.newServiceIface(
-      mb.wrappedService(methodName),
-      mb.params[param.Label].label
+      mb.wrappedService(Some(methodName)),
+      label
     )(builder)
     serviceIface.filtered(filters)
   }
+
+  private[this] def servicePerEndpoint[ServicePerEndpoint <: Filterable[ServicePerEndpoint]](
+    methodName: Option[String]
+  )(
+    implicit builder: ServicePerEndpointBuilder[ServicePerEndpoint]
+  ): ServicePerEndpoint = {
+    val filters: Filter.TypeAgnostic = mb.filters(methodName)
+    val servicePerEndpoint: ServicePerEndpoint = rich.servicePerEndpoint(
+      mb.wrappedService(methodName),
+      label
+    )(builder)
+    servicePerEndpoint.filtered(filters)
+  }
+
+  /**
+   * Construct a `ServicePerEndpoint` to be used for the `methodName` function.
+   *
+   * @param methodName used for scoping metrics (e.g. "clnt/your_client_label/method_name").
+   */
+  def servicePerEndpoint[ServicePerEndpoint <: Filterable[ServicePerEndpoint]](
+    methodName: String
+  )(
+    implicit builder: ServicePerEndpointBuilder[ServicePerEndpoint]
+  ): ServicePerEndpoint =
+    servicePerEndpoint(Some(methodName))
+
+  /**
+   * Construct a `ServicePerEndpoint` to be used for the client.
+   */
+  def servicePerEndpoint[ServicePerEndpoint <: Filterable[ServicePerEndpoint]](
+    implicit builder: ServicePerEndpointBuilder[ServicePerEndpoint]
+  ): ServicePerEndpoint =
+    servicePerEndpoint(None)
 }

@@ -23,7 +23,8 @@ class TransportTest extends FunSuite with GeneratorDrivenPropertyChecks {
     val q = new AsyncQueue[Any]
     val writeQueue = new AsyncQueue[Any]
     val t0 = new QueueTransport[Any, Any](writeQueue, q)
-    val trans: Transport[Int, String] = Transport.cast[Int, String](t0)
+    val trans: Transport[Int, String] =
+      Transport.cast[Int, String](t0)
 
     val s = "a string"
     q.offer(s)
@@ -54,7 +55,8 @@ class TransportTest extends FunSuite with GeneratorDrivenPropertyChecks {
     val q = new AsyncQueue[Any]
     val unused = new AsyncQueue[Any]
     val t0 = new QueueTransport[Any, Any](unused, q)
-    val trans: Transport[Any, Foo] = Transport.cast[Any, Foo](t0)
+    val trans: Transport[Any, Foo] =
+      Transport.cast[Any, Foo](t0)
 
     q.offer(Bar(1))
 
@@ -92,10 +94,12 @@ class TransportTest extends FunSuite with GeneratorDrivenPropertyChecks {
   }
 
   def fromList[A](seq: => List[A]) = new Transport[Any, Option[A]] {
+    type Context = TransportContext
     private[this] var next = seq
     def write(in: Any) = Future.exception(new Exception)
     def read() = synchronized {
-      if (next.isEmpty) Future.None else {
+      if (next.isEmpty) Future.None
+      else {
         val head = next.head
         next = next.tail
         Future.value(Some(head))
@@ -107,9 +111,11 @@ class TransportTest extends FunSuite with GeneratorDrivenPropertyChecks {
     val remoteAddress = new SocketAddress {}
     val peerCertificate = None
     def close(deadline: Time) = Future.exception(new Exception)
+    def context: TransportContext = new LegacyContext(this)
   }
 
   class Failed extends Transport[Any, Any] {
+    type Context = TransportContext
     def write(in: Any) = Future.exception(new Exception)
     def read(): Future[Any] = Future.exception(new Exception)
     val onClose = new Promise[Throwable]
@@ -118,6 +124,7 @@ class TransportTest extends FunSuite with GeneratorDrivenPropertyChecks {
     val remoteAddress = new SocketAddress {}
     val peerCertificate = None
     def close(deadline: Time) = Future.exception(new Exception)
+    def context: TransportContext = new LegacyContext(this)
   }
 
   test("Transport.copyToWriter - discard while writing") {
@@ -212,7 +219,7 @@ class TransportTest extends FunSuite with GeneratorDrivenPropertyChecks {
     }
   }
 
-  test("Transport.collate: read through") (new Collate {
+  test("Transport.collate: read through")(new Collate {
     // Long read
     val r1 = coll.read(10)
     assert(!r1.isDefined)
@@ -242,8 +249,9 @@ class TransportTest extends FunSuite with GeneratorDrivenPropertyChecks {
     assert(awaitResult(coll.read(10)) == None)
   })
 
-  test("Transport.collate: discard while reading") (new Collate {
+  test("Transport.collate: discard while reading")(new Collate {
     val trans1 = new Transport[String, String] {
+      type Context = TransportContext
       val p = new Promise[String]
       var theIntr: Throwable = null
       p.setInterruptHandler {
@@ -258,6 +266,7 @@ class TransportTest extends FunSuite with GeneratorDrivenPropertyChecks {
       def remoteAddress = ???
       def peerCertificate = ???
       def close(deadline: Time) = ???
+      def context: TransportContext = new LegacyContext(this)
     }
 
     val coll1 = Transport.collate(trans1, read)
@@ -277,7 +286,7 @@ class TransportTest extends FunSuite with GeneratorDrivenPropertyChecks {
     assertDiscarded(coll1)
   })
 
-  test("Transport.collate: discard while writing") (new Collate {
+  test("Transport.collate: discard while writing")(new Collate {
     readq.offer("hello")
 
     coll.discard()
@@ -285,7 +294,7 @@ class TransportTest extends FunSuite with GeneratorDrivenPropertyChecks {
     assertDiscarded(coll.read(10))
   })
 
-  test("Transport.collate: discard while buffering") (new Collate {
+  test("Transport.collate: discard while buffering")(new Collate {
     readq.offer("hello")
     val r1 = coll.read(1)
     assert(awaitResult(r1) == Some(Buf.Utf8("h")))
@@ -295,7 +304,7 @@ class TransportTest extends FunSuite with GeneratorDrivenPropertyChecks {
     assertDiscarded(coll.read(10))
   })
 
-  test("Transport.collate: conversion failure") (new Collate {
+  test("Transport.collate: conversion failure")(new Collate {
     readq.offer("hello")
     val r1 = coll.read(10)
     assert(awaitResult(r1) == Some(Buf.Utf8("hello")))

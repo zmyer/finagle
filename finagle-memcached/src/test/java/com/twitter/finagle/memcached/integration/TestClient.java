@@ -14,9 +14,10 @@ import com.twitter.finagle.Address$;
 import com.twitter.finagle.Memcached;
 import com.twitter.finagle.Name$;
 import com.twitter.finagle.Service;
-import com.twitter.finagle.memcached.java.Client;
-import com.twitter.finagle.memcached.java.ClientBase;
-import com.twitter.finagle.memcached.loadbalancer.ConcurrentLoadBalancerFactory;
+import com.twitter.finagle.memcached.JavaClient;
+import com.twitter.finagle.memcached.JavaClientBase;
+import com.twitter.finagle.memcached.integration.external.TestMemcachedServer;
+import com.twitter.finagle.memcached.integration.external.TestMemcachedServer$;
 import com.twitter.finagle.memcached.protocol.Command;
 import com.twitter.finagle.memcached.protocol.Response;
 import com.twitter.io.Buf;
@@ -43,10 +44,10 @@ public class TestClient {
     addrs.add(addr);
 
     Service<Command, Response> service = Memcached.client()
-          .configured(new ConcurrentLoadBalancerFactory.Param(1).mk())
+          .connectionsPerEndpoint(1)
           .newService(Name$.MODULE$.bound(JavaConversions.asScalaBuffer(addrs)), "memcached");
 
-    Client client = ClientBase.newInstance(service);
+    JavaClient client = JavaClientBase.newInstance(service);
     Await.ready(client.set("foo", "bar"));
 
     Option<String> res = Buf.Utf8$.MODULE$.unapply(Await.result(client.get("foo")));

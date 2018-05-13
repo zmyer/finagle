@@ -1,7 +1,7 @@
 package com.twitter.finagle.memcached.util
 
-import com.google.common.base.Strings
 import com.twitter.io.Buf
+import scala.collection.breakOut
 import scala.language.implicitConversions
 
 private[finagle] object Bufs {
@@ -10,7 +10,7 @@ private[finagle] object Bufs {
    * @return the Buf representation of non-empty and non-null Strings, else null
    */
   implicit def nonEmptyStringToBuf(str: String): Buf = {
-    if (Strings.isNullOrEmpty(str))
+    if (str == null || str.isEmpty)
       null
     else
       Buf.Utf8(str)
@@ -23,9 +23,8 @@ private[finagle] object Bufs {
   implicit def seqOfNonEmptyStringToBuf(strings: Traversable[String]): Seq[Buf] = {
     if (strings == null) {
       null
-    }
-    else {
-      strings.map(nonEmptyStringToBuf).toSeq
+    } else {
+      strings.map(nonEmptyStringToBuf)(breakOut)
     }
   }
 
@@ -33,7 +32,6 @@ private[finagle] object Bufs {
 
     /**
      * decode the Buf as a UTF8 string and split on delimiter
-     * @param delimiter
      * @return the UTF8 Buf encoded Strings resulting from the split
      */
     def split(delimiter: Char): Seq[Buf] = {
@@ -66,10 +64,10 @@ private[finagle] object Bufs {
       bytes
     }
 
-    override def apply(idx: Int): Byte = _bytes.apply(idx)
+    def apply(idx: Int): Byte = _bytes.apply(idx)
 
-    override def iterator: Iterator[Byte] = _bytes.iterator
+    def iterator: Iterator[Byte] = _bytes.iterator
 
-    override def length: Int = buffer.length
+    def length: Int = buffer.length
   }
 }

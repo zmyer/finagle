@@ -1,8 +1,9 @@
 package com.twitter.finagle.http2.param
 
+import com.twitter.conversions.storage._
 import com.twitter.finagle.Stack
 import com.twitter.util.StorageUnit
-import io.netty.handler.codec.http2.Http2HeadersEncoder
+import io.netty.handler.codec.http2.{Http2MultiplexCodec, Http2HeadersEncoder}
 
 /**
  * A class eligible for configuring whether to use the http/2 "prior knowledge"
@@ -32,15 +33,18 @@ object HeaderTableSize {
 }
 
 /**
- *  A class for configuring overrides to the default pushEnabled setting.
+ * A class for configuring overrides to the default pushEnabled setting.
+ *
+ * Marked as private because finagle doesn't support it yet.  Right now
+ * the default of, "Do not use push promises" is the only supported mode.
  */
-case class PushEnabled(pushEnabled: Option[Boolean]) {
+private[http2] case class PushEnabled(pushEnabled: Option[Boolean]) {
   def mk(): (PushEnabled, Stack.Param[PushEnabled]) =
     (this, PushEnabled.param)
 }
 
-object PushEnabled {
-  implicit val param = Stack.Param(PushEnabled(None))
+private[http2] object PushEnabled {
+  implicit val param = Stack.Param(PushEnabled(Some(false)))
 }
 
 /**
@@ -82,13 +86,15 @@ object MaxFrameSize {
 /**
  * A class for configuring overrides to the default maxHeaderListSize setting.
  */
-case class MaxHeaderListSize(maxHeaderListSize: Option[StorageUnit]) {
+case class MaxHeaderListSize(maxHeaderListSize: StorageUnit) {
   def mk(): (MaxHeaderListSize, Stack.Param[MaxHeaderListSize]) =
     (this, MaxHeaderListSize.param)
 }
 
 object MaxHeaderListSize {
-  implicit val param = Stack.Param(MaxHeaderListSize(None))
+  // TODO: revert to 8.kilobytes after we resolve https://github.com/netty/netty/issues/7511
+  // Netty is double counting header names right now.
+  implicit val param = Stack.Param(MaxHeaderListSize(16.kilobytes))
 }
 
 /**
@@ -126,4 +132,25 @@ object HeaderSensitivity {
     }
 
   implicit val param = Stack.Param(HeaderSensitivity(DefaultSensitivityDetector))
+}
+
+/**
+ * The logger name to be used for the root HTTP/2 frame logger. This allows each frame type
+ * to be turned on and off by changing the level of prefix.<FRAME_TYPE>, or turning everything
+ * on by changing the level of prefix. The HTTP/2 frame logger logs at the level TRACE, so you
+ * must set logger to that level to see the frame logs. The prefix if not set defaults to
+ * io.netty.handler.codec.http2.Http2MultiplexCodec
+ *
+ * @param loggerNamePrefix The name of the logger to be used as the root logger name for
+ *                         netty HTTP/2 frame logging.
+ */
+case class FrameLoggerNamePrefix(loggerNamePrefix: String) {
+  def mk(): (FrameLoggerNamePrefix, Stack.Param[FrameLoggerNamePrefix]) =
+    (this, FrameLoggerNamePrefix.param)
+}
+
+object FrameLoggerNamePrefix {
+  private[this] val DefaultFrameLoggerPrefix: String = classOf[Http2MultiplexCodec].getName()
+
+  implicit val param = Stack.Param(FrameLoggerNamePrefix(DefaultFrameLoggerPrefix))
 }

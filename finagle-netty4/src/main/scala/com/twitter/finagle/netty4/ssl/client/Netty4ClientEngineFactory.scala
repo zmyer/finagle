@@ -2,45 +2,17 @@ package com.twitter.finagle.netty4.ssl.client
 
 import com.twitter.finagle.Address
 import com.twitter.finagle.netty4.param.Allocator
-import com.twitter.finagle.netty4.ssl.Netty4SslConfigurations
-import com.twitter.finagle.ssl._
+import com.twitter.finagle.ssl.Engine
 import com.twitter.finagle.ssl.client.{SslClientConfiguration, SslClientEngineFactory}
 import io.netty.buffer.ByteBufAllocator
-import io.netty.handler.ssl.{OpenSsl, SslContext, SslContextBuilder}
-import javax.net.ssl.SSLEngine
+import io.netty.handler.ssl.OpenSsl
 
 /**
  * This engine factory uses Netty 4's `SslContextBuilder`. It is the
  * recommended path for using native SSL/TLS engines with Finagle.
  */
-class Netty4ClientEngineFactory(allocator: ByteBufAllocator, forceJdk: Boolean)
-  extends SslClientEngineFactory {
-
-  private[this] def mkSslEngine(
-    context: SslContext,
-    address: Address,
-    config: SslClientConfiguration
-  ): SSLEngine =
-    address match {
-      case Address.Inet(isa, _) =>
-        context.newEngine(allocator, SslClientEngineFactory.getHostname(isa, config), isa.getPort)
-      case _ =>
-        context.newEngine(allocator)
-    }
-
-  private[this] def addKey(
-    builder: SslContextBuilder,
-    keyCredentials: KeyCredentials
-  ): SslContextBuilder =
-    keyCredentials match {
-      case KeyCredentials.Unspecified =>
-        builder // Do Nothing
-      case KeyCredentials.CertAndKey(certFile, keyFile) =>
-        builder.keyManager(certFile, keyFile)
-      case _: KeyCredentials.CertKeyAndChain =>
-        throw SslConfigurationException.notSupported(
-          "KeyCredentials.CertKeyAndChain", "Netty4ClientEngineFactory")
-    }
+final class Netty4ClientEngineFactory(allocator: ByteBufAllocator, forceJdk: Boolean)
+    extends SslClientEngineFactory {
 
   /**
    * Creates a new `Engine` based on an `Address` and an `SslClientConfiguration`.
@@ -50,25 +22,15 @@ class Netty4ClientEngineFactory(allocator: ByteBufAllocator, forceJdk: Boolean)
    * @param config A collection of parameters which the engine factory should
    * consider when creating the TLS client `Engine`.
    *
-   * @note Using `TrustCredentials.Insecure` forces the underlying engine to be
-   * a JDK engine and not a native engine, based on what Netty supports.
-   *
    * @note `ApplicationProtocols` other than Unspecified are only supported
    * by using a native engine via netty-tcnative.
    */
   def apply(address: Address, config: SslClientConfiguration): Engine = {
-    val builder = SslContextBuilder.forClient()
-    val withKey = addKey(builder, config.keyCredentials)
-    val withProvider = Netty4SslConfigurations.configureProvider(withKey, forceJdk)
-    val withTrust = Netty4SslConfigurations.configureTrust(withProvider, config.trustCredentials)
-    val withAppProtocols = Netty4SslConfigurations.configureApplicationProtocols(
-      withTrust, config.applicationProtocols)
-    val context = withAppProtocols.build()
-    val engine = new Engine(mkSslEngine(context, address, config))
-    SslClientEngineFactory.configureEngine(engine, config)
+    val context = Netty4ClientSslConfigurations.createClientContext(config, forceJdk)
+    val engine =
+      Netty4ClientSslConfigurations.createClientEngine(address, config, context, allocator)
     engine
   }
-
 }
 
 object Netty4ClientEngineFactory {

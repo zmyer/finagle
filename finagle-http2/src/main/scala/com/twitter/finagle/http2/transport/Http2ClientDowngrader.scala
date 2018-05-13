@@ -3,6 +3,7 @@ package com.twitter.finagle.http2.transport
 import io.netty.buffer.{ByteBuf, Unpooled}
 import io.netty.channel.ChannelHandlerContext
 import io.netty.handler.codec.http._
+import io.netty.handler.codec.http2.Http2Exception.HeaderListSizeException
 import io.netty.handler.codec.http2.{Http2EventAdapter, Http2Headers, HttpConversionUtil}
 import java.nio.charset.StandardCharsets.UTF_8
 
@@ -20,8 +21,11 @@ private[http2] object Http2ClientDowngrader extends Http2EventAdapter {
   // Objects that are emitted from this Listener
   sealed trait StreamMessage
   case class Message(obj: HttpObject, streamId: Int) extends StreamMessage
-  case class GoAway(obj: HttpObject, lastStreamId: Int) extends StreamMessage
+  case class GoAway(obj: HttpObject, lastStreamId: Int, errorCode: Long) extends StreamMessage
   case class Rst(streamId: Int, errorCode: Long) extends StreamMessage
+
+  // exn is purposefully narrow for now, we can expand it if necessary
+  case class StreamException(exn: HeaderListSizeException, streamId: Int) extends StreamMessage
   case object Ping extends StreamMessage
 
   // Http2EventAdapter overrides
@@ -63,7 +67,7 @@ private[http2] object Http2ClientDowngrader extends Http2EventAdapter {
     endOfStream: Boolean
   ): Unit = {
     val msg = if (endOfStream) {
-      HttpConversionUtil.toHttpResponse(
+      HttpConversionUtil.toFullHttpResponse(
         streamId,
         headers,
         ctx.alloc(),
@@ -75,8 +79,12 @@ private[http2] object Http2ClientDowngrader extends Http2EventAdapter {
       val status = HttpConversionUtil.parseStatus(headers.status)
       val msg = new DefaultHttpResponse(HttpVersion.HTTP_1_1, status, /*validateHeaders*/ false)
       HttpConversionUtil.addHttp2ToHttpHeaders(
-        streamId, headers, msg.headers, HttpVersion.HTTP_1_1,
-        /*isTrailer*/ false, /*isRequest*/ false)
+        streamId,
+        headers,
+        msg.headers,
+        HttpVersion.HTTP_1_1,
+        /*isTrailer*/ false, /*isRequest*/ false
+      )
       msg
     }
     ctx.fireChannelRead(Message(msg, streamId))
@@ -121,7 +129,7 @@ private[http2] object Http2ClientDowngrader extends Http2EventAdapter {
     } else HttpResponseStatus.BAD_REQUEST
 
     val rep = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, status)
-    ctx.fireChannelRead(GoAway(rep, lastStreamId))
+    ctx.fireChannelRead(GoAway(rep, lastStreamId, errorCode))
   }
 
   override def onPingAckRead(ctx: ChannelHandlerContext, data: ByteBuf): Unit = {

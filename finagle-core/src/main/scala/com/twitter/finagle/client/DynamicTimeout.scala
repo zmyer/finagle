@@ -4,6 +4,7 @@ import com.twitter.finagle._
 import com.twitter.finagle.context.Contexts
 import com.twitter.finagle.service.TimeoutFilter
 import com.twitter.util.Duration
+import com.twitter.util.tunable.Tunable
 
 /**
  * Used for the creation of [[Stack]] modules that have dynamic timeouts.
@@ -11,7 +12,7 @@ import com.twitter.util.Duration
  * @see [[TimeoutFilter]]
  * @see [[LatencyCompensation]]
  */
-private[finagle] object DynamicTimeout {
+object DynamicTimeout {
 
   private[this] val PerRequestKey = new Contexts.local.Key[Duration]()
   private[this] val TotalKey = new Contexts.local.Key[Duration]()
@@ -61,13 +62,18 @@ private[finagle] object DynamicTimeout {
 
   private[this] def timeoutFn(
     timeoutKey: Contexts.local.Key[Duration],
+    defaultTunableTimeout: Tunable[Duration],
     defaultTimeout: Duration,
     latencyCompensation: Duration
   ): () => Duration = () => {
     val withoutCompensation = {
       val to = Contexts.local.getOrElse(timeoutKey, UseDefaultTimeoutFn)
-      if (to eq UseDefaultTimeout) defaultTimeout
-      else to
+      if (to eq UseDefaultTimeout) {
+        defaultTunableTimeout() match {
+          case Some(duration) => duration
+          case None => defaultTimeout
+        }
+      } else to
     }
     if (latencyCompensation.isFinite) withoutCompensation + latencyCompensation
     else withoutCompensation
@@ -92,8 +98,8 @@ private[finagle] object DynamicTimeout {
       TimeoutFilter.Param,
       param.Timer,
       LatencyCompensation.Compensation,
-      ServiceFactory[Req, Rep]]
-    {
+      ServiceFactory[Req, Rep]
+    ] {
       val role: Stack.Role = TimeoutFilter.role
       val description: String =
         "Apply a dynamic timeout-derived deadline to request"
@@ -105,9 +111,15 @@ private[finagle] object DynamicTimeout {
         next: ServiceFactory[Req, Rep]
       ): ServiceFactory[Req, Rep] = {
         val filter = new TimeoutFilter[Req, Rep](
-          timeoutFn(PerRequestKey, defaultTimeout.timeout, compensation.howlong),
+          timeoutFn(
+            PerRequestKey,
+            defaultTimeout.tunableTimeout,
+            TimeoutFilter.Param.Default, // tunableTimeout() should always produce a value,
+            compensation.howlong // but we fall back on the default if not
+          ),
           duration => new IndividualRequestTimeoutException(duration),
-          timer.timer)
+          timer.timer
+        )
         filter.andThen(next)
       }
     }
@@ -130,15 +142,16 @@ private[finagle] object DynamicTimeout {
   private[client] def totalFilter(
     params: Stack.Params
   ): Filter.TypeAgnostic = {
-    val defaultTimeout = params[TimeoutFilter.TotalTimeout].timeout
+    val tunableTimeout = params[TimeoutFilter.TotalTimeout].tunableTimeout
+    // tunableTimeout() should always produce a value, but we fall back on the default if not
+    val defaultTimeout = TimeoutFilter.TotalTimeout.Default
     val compensation = params[LatencyCompensation.Compensation].howlong
     val timer = params[param.Timer].timer
-    val timeoutFunc = timeoutFn(TotalKey, defaultTimeout, compensation)
-    val exceptionFn = { d: Duration => new GlobalRequestTimeoutException(d) }
-    TimeoutFilter.typeAgnostic(
-      timeoutFunc,
-      exceptionFn,
-      timer)
+    val timeoutFunc = timeoutFn(TotalKey, tunableTimeout, defaultTimeout, compensation)
+    val exceptionFn = { d: Duration =>
+      new GlobalRequestTimeoutException(d)
+    }
+    TimeoutFilter.typeAgnostic(timeoutFunc, exceptionFn, timer)
   }
 
 }

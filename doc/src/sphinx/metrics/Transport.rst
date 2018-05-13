@@ -43,13 +43,13 @@ ChannelStatsHandler
   "connection_duration", "connection_received_bytes", or "connection_sent_bytes"
   histograms.
 
-**connection_duration**
+**connection_duration** `verbosity:debug`
   A histogram of the duration of the lifetime of a connection.
 
-**connection_received_bytes**
+**connection_received_bytes** `verbosity:debug`
   A histogram of the number of bytes received over the lifetime of a connection.
 
-**connection_sent_bytes**
+**connection_sent_bytes** `verbosity:debug`
   A histogram of the number of bytes sent over the lifetime of a connection.
 
 **received_bytes**
@@ -58,10 +58,10 @@ ChannelStatsHandler
 **sent_bytes**
   A counter of the total number of sent bytes.
 
-**writableDuration**
+**writableDuration** `verbosity:debug`
   A gauge of the length of time the socket has been writable in the channel.
 
-**unwritableDuration**
+**unwritableDuration** `verbosity:debug`
   A gauge of the length of time the socket has been unwritable in the channel.
 
 **connections**
@@ -71,6 +71,10 @@ ChannelStatsHandler
 **exn/<exception_name>+**
   A counter of the number of times a specific exception has been thrown within
   a Netty pipeline.
+
+**tls/connections**
+  A gauge of the total number of SSL/TLS connections that are currently open in
+  the channel.
 
 IdleChannelHandler
 <<<<<<<<<<<<<<<<<<
@@ -91,13 +95,3 @@ Thrift
   frequently. Use the ``com.twitter.finagle.Thrift.param.MaxReusableBufferSize``
   param to set the max buffer size to the size of a typical thrift response for
   your server.
-
-RecvBufferSizeStatsHandler (when Netty 4 pooling is enabled)
-<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-
-**transport/receive_buffer_bytes**
-  A histogram of the receive buffer size in bytes. This metric is useful when
-  it comes to tuning pooling of receive buffers in ``finagle-netty4`` (can be enabled
-  with a flag: `-com.twitter.finagle.netty.poolReceiveBuffers`). For maximum throughput,
-  pool's chunk size should be bigger than ``receive_buffer_bytes.max`` of any client/server
-  running on a given JVM.

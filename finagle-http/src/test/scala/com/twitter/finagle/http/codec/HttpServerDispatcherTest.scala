@@ -3,41 +3,45 @@ package com.twitter.finagle.http.codec
 import com.twitter.concurrent.AsyncQueue
 import com.twitter.conversions.time._
 import com.twitter.finagle.{Service, Status}
-import com.twitter.finagle.http
+import com.twitter.finagle.http.{Fields, Request, Response, Version, Status => HttpStatus}
 import com.twitter.finagle.http.exp.StreamTransport
-import com.twitter.finagle.http.{Fields, Request, Response, Version}
-import com.twitter.finagle.http.netty.Netty3ServerStreamTransport
-import com.twitter.finagle.netty3.ChannelBufferBuf
+import com.twitter.finagle.netty4.http.{Bijections, Netty4ServerStreamTransport}
 import com.twitter.finagle.stats.NullStatsReceiver
 import com.twitter.finagle.transport.{QueueTransport, Transport}
-import com.twitter.io.Reader
-import com.twitter.util.{Await, Future, Promise}
-import org.jboss.netty.buffer.ChannelBuffers
-import org.jboss.netty.handler.codec.http.{
-  DefaultHttpChunk, HttpChunk, HttpResponse, HttpResponseStatus}
-import org.junit.runner.RunWith
+import com.twitter.io.{Buf, Reader}
+import com.twitter.util.{Await, Awaitable, Future, Promise}
+import io.netty.buffer.Unpooled
+import io.netty.handler.codec.http.{DefaultHttpContent, HttpContent, HttpRequest, HttpResponse, HttpResponseStatus, LastHttpContent}
+import java.nio.charset.StandardCharsets
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
+// Note: We need a concrete impl to test it so the finagle-http package is most
+// appropriate even though the implementation is in finagle-base-http.
 class HttpServerDispatcherTest extends FunSuite {
   import HttpServerDispatcherTest._
 
-  def testChunk(trans: Transport[Any, Any], chunk: HttpChunk) = {
+  private[this] def from(req: Request): HttpRequest = Bijections.finagle.requestToNetty(req)
+
+  private[this] def await[T](t: Awaitable[T]): T = Await.result(t, 15.seconds)
+
+  private[this] def testChunk(trans: Transport[Any, Any], chunk: HttpContent): Unit = {
     val f = trans.read()
     assert(!f.isDefined)
-    Await.ready(trans.write(chunk), 5.seconds)
-    val c = Await.result(f, 5.seconds).asInstanceOf[HttpChunk]
-    assert(c.getContent == chunk.getContent)
+    val expected = chunk.content.duplicate.retain()
+    await(trans.write(chunk))
+    val c = await(f).asInstanceOf[HttpContent]
+    assert(c.content == expected)
   }
 
   test("invalid message") {
     val (in, out) = mkPair[Any, Any]
-    val service = Service.mk { req: Request => Future.value(Response()) }
+    val service = Service.mk { _: Request =>
+      Future.value(Response())
+    }
     val disp = new HttpServerDispatcher(out, service, NullStatsReceiver)
 
     in.write("invalid")
-    Await.ready(out.onClose, 5.seconds)
+    await(out.onClose)
     assert(out.status == Status.Closed)
   }
 
@@ -52,10 +56,10 @@ class HttpServerDispatcherTest extends FunSuite {
     val (in, out) = mkPair[Any, Any]
     val disp = new HttpServerDispatcher(out, service, NullStatsReceiver)
 
-    in.write(Request("/foo").httpRequest)
-    Await.result(in.read, 5.seconds) match {
+    in.write(from(Request("/foo")))
+    await(in.read()) match {
       case resp: HttpResponse =>
-        assert(resp.getStatus == HttpResponseStatus.OK)
+        assert(resp.status == HttpResponseStatus.OK)
         assert(resp.headers().get(Fields.Connection) == "close")
 
       case other => fail(s"Received unknown type: ${other.getClass.getSimpleName}")
@@ -63,28 +67,32 @@ class HttpServerDispatcherTest extends FunSuite {
   }
 
   test("streaming request body") {
-    val service = Service.mk { req: Request => ok(req.reader) }
+    val service = Service.mk { req: Request =>
+      ok(req.reader)
+    }
     val (in, out) = mkPair[Any, Any]
     val disp = new HttpServerDispatcher(out, service, NullStatsReceiver)
 
     val req = Request()
     req.setChunked(true)
-    in.write(req.httpRequest)
-    Await.result(in.read, 5.seconds)
+    in.write(from(req))
+    await(in.read())
 
     testChunk(in, chunk("a"))
     testChunk(in, chunk("foo"))
-    testChunk(in, HttpChunk.LAST_CHUNK)
+    testChunk(in, LastHttpContent.EMPTY_LAST_CONTENT)
   }
 
   test("client abort before dispatch") {
     val promise = new Promise[Response]
-    val service = Service.mk { _: Request => promise }
+    val service = Service.mk { _: Request =>
+      promise
+    }
 
     val (in, out) = mkPair[Any, Any]
     val disp = new HttpServerDispatcher(out, service, NullStatsReceiver)
 
-    in.write(Request().httpRequest)
+    in.write(from(Request()))
 
     // Simulate channel closure
     out.close()
@@ -94,19 +102,21 @@ class HttpServerDispatcherTest extends FunSuite {
   test("client abort after dispatch") {
     val req = Request()
     val res = req.response
-    val service = Service.mk { _: Request => Future.value(res) }
+    val service = Service.mk { _: Request =>
+      Future.value(res)
+    }
 
     val (in, out) = mkPair[Any, Any]
     val disp = new HttpServerDispatcher(out, service, NullStatsReceiver)
 
     req.response.setChunked(true)
-    in.write(req.httpRequest)
+    in.write(from(req))
 
-    Await.result(in.read(), 5.seconds)
+    await(in.read())
 
     // Simulate channel closure
     out.close()
-    intercept[Reader.ReaderDiscarded] { Await.result(res.writer.write(buf(".")), 5.seconds) }
+    intercept[Reader.ReaderDiscarded] { await(res.writer.write(Buf.Utf8("."))) }
   }
 }
 
@@ -115,15 +125,18 @@ object HttpServerDispatcherTest {
     val inQ = new AsyncQueue[Any]
     val outQ = new AsyncQueue[Any]
     (
-      Transport.cast[A,B](new QueueTransport(outQ, inQ)),
-      new Netty3ServerStreamTransport(new QueueTransport(inQ, outQ))
+      Transport.cast[A, B](new QueueTransport(outQ, inQ)),
+      new Netty4ServerStreamTransport(new QueueTransport(inQ, outQ))
     )
   }
 
-  def wrap(msg: String) = ChannelBuffers.wrappedBuffer(msg.getBytes("UTF-8"))
-  def buf(msg: String) = ChannelBufferBuf.Owned(wrap(msg))
-  def chunk(msg: String) = new DefaultHttpChunk(wrap(msg))
+  def chunk(content: String): HttpContent = {
+    val bytes = content.getBytes(StandardCharsets.UTF_8)
+    val buf = Unpooled.buffer(bytes.length)
+    buf.writeBytes(bytes)
+    new DefaultHttpContent(buf)
+  }
 
   def ok(reader: Reader): Future[Response] =
-    Future.value(Response(Version.Http11, http.Status.Ok, reader))
+    Future.value(Response(Version.Http11, HttpStatus.Ok, reader))
 }
