@@ -7,6 +7,108 @@ Note that ``PHAB_ID=#`` and ``RB_ID=#`` correspond to associated messages in com
 Unreleased
 ----------
 
+Runtime Behavior Changes
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+  * finagle-http2: Unprocessed streams are retryable in case of GOAWAY.
+    ``PHAB_ID=D174401``
+
+New Features
+~~~~~~~~~~~~
+
+  * finagle-core: Add `PropagateDeadlines` `Stack.Param` to `TimeoutFilter` for
+    disabling propagation of deadlines to outbound requests.
+    ``PHAB_ID=D168405``
+
+  * finagle-core: Add `toString` implementations to `c.t.finagle.Service` and
+    `c.t.finagle.Filter`. Update in `Filter#andThen` composition to expose a
+    useful `toString` for composed Filters and a composed Service (a Filter chain
+    with a terminal Service or ServiceFactory).
+
+    The default implementation for `Filter` and `Service` is `getClass.getName`. When
+    composing filters, the `andThen` composition method correctly tracks the composed
+    parts to produce a useful `toString`, e.g.,
+
+    ```
+    package com.foo
+
+    import com.twitter.finagle.{Filter, Service}
+    import com.twitter.util.Future
+
+    class MyFilter1 extends Filter[Int, Int, Int, Int] {
+       def apply(request: Int, service: Service[Int, Int]): Future[Int] = ???
+    }
+    ```
+
+    ```
+    package com.foo
+
+    import com.twitter.finagle.{Filter, Service}
+    import com.twitter.util.Future
+
+    class MyFilter2 extends Filter[Int, Int, Int, Int] {
+      def apply(request: Int, service: Service[Int, Int]): Future[Int] = ???
+    }
+    ```
+
+    ```
+    val filters = (new MyFilter1).andThen(new MyFilter2)
+    ```
+
+    `filters.toString` would emit the String "com.foo.MyFilter1.andThen(com.foo.MyFilter2)"
+
+    If a Service (or ServiceFactory) were then added:
+
+    ```
+    import com.twitter.finagle.{Filter, Service}
+    import com.twitter.finagle.service.ConstantService
+    import com.twitter.util.Future
+
+    ...
+
+    val svc: Service[Int, Int] = filters.andThen(new ConstantService[Int, Int](Future.value(2)))
+    ```
+
+    Then, `svc.toString` would thus return the String:
+    "com.foo.MyFilter1.andThen(com.foo.MyFilter2).andThen(com.twitter.finagle.service.ConstantService(ConstFuture(2)))"
+
+    Filter implementations are permitted to override their `toString` implementations which would
+    replace the default of `getClass.getName`. ``PHAB_ID=D172526``
+
+  * finagle-core: Make `Filter.TypeAgnostic` an abstract class for Java usability.
+    ``PHAB_ID=D172716``
+
+  * finagle-core: `c.t.f.filter.NackAdmissionFilter` is now public. ``PHAB_ID=D177322``
+
+  * finagle-core: Extended `c.t.f.ssl.KeyCredentials` and `c.t.f.ssl.TrustCredentials` to work
+    with `javax.net.ssl.KeyManagerFactory` and `javax.net.ssl.TrustManagerFactory` respectively.
+    ``PHAB_ID=D177484``
+
+Breaking API Changes
+~~~~~~~~~~~~~~~~~~~~
+  * finagle-core: Rename `DeadlineFilter.Param(maxRejectFraction)` to
+    `DeadlineFilter.MaxRejectFraction(maxRejectFraction)` to reduce confusion
+    when adding additional params.
+    ``PHAB_ID=D172402``
+
+
+Bug Fixes
+~~~~~~~~~
+
+  * finagle-http2: `StreamTransportFactory` now marks itself as dead/closed when it runs out of
+    HTTP/2 stream IDs instead of stalling. This allows the connection to be closed/reestablished in
+    accordance with the spec ``PHAB_ID=D175898``
+
+  * finagle-netty4: `SslServerSessionVerifier` is now supplied with the proper peer address
+    rather than `Address.failing`. ``PHAB_ID=D168334``
+
+  * finagle-thrift/thriftmux: Disabled client side per-endpoint stats by default for client
+    ServicePerEndpoint. It can be set via `c.t.f.thrift.RichClientParam` or a `with`-method
+    as `Thrift{Mux}.client.withPerEndpointStats`. ``PHAB_ID=D169427``
+
+  * finagle-netty4: Avoid NoClassDefFoundError if netty-transport-native-epoll is not available
+    on the classpath.
+
 18.5.0
 -------
 
@@ -44,7 +146,7 @@ New Features
     `CursoredStatement.asJava()`. Through this, you can use the API with
     varargs and Java 8 lambdas. ``PHAB_ID=D158399``
 
-  * finagle-toggle: Improved Java compatiblity for `ToggleMap` and `Toggle`. ``PHAB_ID=D164489``
+  * finagle-toggle: Improved Java compatibility for `ToggleMap` and `Toggle`. ``PHAB_ID=D164489``
 
   * finagle-toggle: `StandardToggleMap.apply` and `StandardToggleMap.registeredLibraries` now
     use `ToggleMap.Mutable` to better support mutating the underlying mutable `ToggleMap`.
